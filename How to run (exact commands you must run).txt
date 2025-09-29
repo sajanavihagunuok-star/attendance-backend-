@@ -1,0 +1,23 @@
+How to run (exact commands you must run)
+Before shutdown (while server running and %TOKEN% set), export current state:
+
+Open cmd.exe in backend folder
+
+set TOKEN=your_token_here
+
+node export_state.js
+
+Result: data.json created in backend folder
+
+
+
+
+After restart (server started with npm run dev), restore state:
+
+Ensure server is running
+
+In cmd.exe set TOKEN again
+
+node restore_state.js
+
+Result: sessions recreated and attendance re-posted
