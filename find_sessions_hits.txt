@@ -1,0 +1,28 @@
+export_state.js:18:    const sessions = await getJson('/sessions')
+export_state.js:19:    const attendancePromises = sessions.map(s => getJson(`/sessions/${s.id}/attendance`).catch(()=>[]))
+export_state.js:22:    sessions.forEach((s, i) => { attendance[s.id] = attendanceArrays[i] || [] })
+export_state.js:23:    const out = { exportedAt: Date.now(), sessions, attendance }
+export_state.js:25:    console.log('Saved data.json with', sessions.length, 'sessions')
+index.js:27:const sessions = []; // { id, subjectId, start, end, createdBy }
+index.js:201:// Sessions
+index.js:202:// Only instructors and admins can create sessions
+index.js:203:app.post('/sessions', authMiddleware, requireRole('instructor', 'admin'), (req, res) => {
+index.js:207:  sessions.push(s);
+index.js:211:// Anyone authenticated can list sessions; optionally filter by createdBy for instructors
+index.js:212:app.get('/sessions', authMiddleware, (req, res) => {
+index.js:213:  res.json(sessions);
+index.js:216:app.get('/sessions/:id/attendance', authMiddleware, (req, res) => {
+index.js:223:app.post('/sessions/:id/attendance', authMiddleware, (req, res) => {
+node_modules\@supabase\auth-js\dist\main\lib\fetch.js:65:        // `sessions` table. This usually means the user has signed out, has been
+node_modules\@supabase\auth-js\dist\module\lib\fetch.js:62:        // `sessions` table. This usually means the user has signed out, has been
+Replace export_state.js:18:    const sessions = await getJson('/sessions')
+Replace export_state.js:19:    const attendancePromises = sessions.map(s => getJson(`/sessions/${s.id}/attendance`).catch(()=>[]))
+Replace export_state.js:22:    sessions.forEach((s, i) => { attendance[s.id] = attendanceArrays[i] || [] })
+Replace export_state.js:23:    const out = { exportedAt: Date.now(), sessions, attendance }
+Replace export_state.js:25:    console.log('Saved data.json with', sessions.length, 'sessions')
+Replace restore_state.js:30:    for (const s of data.sessions || []) {
+Replace restore_state.js:32:      const r = await postJson('/sessions', body, true)
+Replace restore_state.js:52:        const r = await postJson(`/sessions/${newId}/attendance`, body, false)
+restore_state.js:30:    for (const s of data.sessions || []) {
+restore_state.js:32:      const r = await postJson('/sessions', body, true)
+restore_state.js:52:        const r = await postJson(`/sessions/${newId}/attendance`, body, false)

@@ -1,0 +1,297 @@
+import express from 'express';
+import jwt from 'jsonwebtoken';
+import fetch from 'node-fetch';
+import cors from 'cors';
+import bodyParser from 'body-parser';
+import { randomUUID } from 'crypto';
+import { createClient } from '@supabase/supabase-js';
+
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+
+// Environment config
+const JWT_SECRET = process.env.JWT_SECRET || 'change_this_for_prod';
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+// Supabase admin client (only when envs are set)
+const supabaseAdmin =
+  SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    : null;
+
+// In-memory demo stores (replace with DB for production)
+const users = []; // { id, email, displayName, role, password }
+const subjects = []; // { id, name }
+const sessions = []; // { id, subjectId, start, end, createdBy }
+const attendance = {}; // sessionId -> [ { id, userId, present, timestamp } ]
+
+// Utility token generator for local demo accounts
+function generateToken(user) {
+  const payload = { id: user.id, email: user.email, role: user.role };
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '30d' });
+}
+
+// Ensures a profiles row exists for a Supabase auth user
+async function upsertProfileFromSupabaseUser(supabaseUser) {
+  if (!supabaseAdmin || !supabaseUser || !supabaseUser.id) return null;
+  const id = supabaseUser.id;
+  const email = supabaseUser.email || null;
+  const display_name =
+    supabaseUser.user_metadata?.full_name ||
+    supabaseUser.user_metadata?.displayName ||
+    supabaseUser.email ||
+    null;
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('profiles')
+      .upsert({ id, email, display_name }, { onConflict: 'id' });
+
+    if (error) {
+      console.error('upsertProfile error', error);
+      return null;
+    }
+    return data;
+  } catch (err) {
+    console.error('upsertProfile exception', err);
+    return null;
+  }
+}
+
+// Auth middleware: accept local demo JWTs first, then fall back to Supabase verification
+async function authMiddleware(req, res, next) {
+  const auth = req.headers.authorization;
+  if (!auth) return res.status(401).json({ error: 'Missing authorization' });
+  const parts = auth.split(' ');
+  if (parts.length !== 2) return res.status(401).json({ error: 'Invalid authorization format' });
+  const token = parts[1];
+
+  // 1) Try local JWT verification first (for demo register/login tokens)
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.user = { id: payload.id, email: payload.email, role: payload.role || 'user' };
+    return next();
+  } catch (localErr) {
+    // ignore local verification error and continue to Supabase verification
+  }
+
+  // 2) If service role is configured, verify with Supabase (for Supabase-issued tokens)
+  if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
+    try {
+      const resp = await fetch(`${SUPABASE_URL.replace(/\/$/, '')}/auth/v1/user`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+        },
+      });
+
+      if (!resp.ok) {
+        return res.status(401).json({ error: 'Invalid token' });
+      }
+
+      const user = await resp.json();
+
+      // Upsert profile so roles persist in Postgres
+      await upsertProfileFromSupabaseUser(user);
+
+      // Read role from profiles table if possible
+      if (supabaseAdmin) {
+        try {
+          const { data: profiles, error: pErr } = await supabaseAdmin
+            .from('profiles')
+            .select('role')
+            .eq('id', user.id)
+            .limit(1);
+
+          if (pErr) {
+            console.error('profile read error', pErr);
+            req.user = { id: user.id, email: user.email, role: 'user', raw: user };
+            return next();
+          }
+
+          if (profiles && profiles.length) {
+            req.user = { id: user.id, email: user.email, role: profiles[0].role || 'user', raw: user };
+            return next();
+          } else {
+            // create profile if missing
+            try {
+              await supabaseAdmin
+                .from('profiles')
+                .insert({ id: user.id, email: user.email, display_name: user.email, role: 'user' });
+            } catch (insErr) {
+              console.error('failed to insert default profile', insErr);
+            }
+            req.user = { id: user.id, email: user.email, role: 'user', raw: user };
+            return next();
+          }
+        } catch (err) {
+          console.error('profile lookup/upsert error', err);
+          req.user = { id: user.id, email: user.email, role: 'user', raw: user };
+          return next();
+        }
+      }
+
+      // fallback if no supabaseAdmin client (shouldn't happen)
+      req.user = { id: user.id, email: user.email, role: user.role || 'user', raw: user };
+      return next();
+    } catch (err) {
+      console.error('Supabase verification error', err);
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+  }
+
+  // 3) Neither local nor Supabase verification succeeded
+  return res.status(401).json({ error: 'Invalid token' });
+}
+
+// Role check middleware factory
+function requireRole(...allowedRoles) {
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ error: 'Missing user' });
+    const userRole = (req.user.role || '').toString();
+    if (allowedRoles.includes(userRole)) return next();
+    return res.status(403).json({ error: 'Forbidden: insufficient role' });
+  };
+}
+
+// Health
+app.get('/', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+// Auth endpoints (demo local register/login)
+// Register creates a demo user with a role you can pass (default user)
+app.post('/auth/register', (req, res) => {
+  const { email, password, displayName, role } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'Missing email or password' });
+  if (users.find((u) => u.email === email)) return res.status(400).json({ error: 'Email exists' });
+
+  const user = { id: randomUUID(), email, displayName: displayName || '', role: role || 'user', password };
+  users.push(user);
+
+  const token = generateToken(user);
+  res.json({ user: { id: user.id, email: user.email, displayName: user.displayName, role: user.role }, token });
+});
+
+app.post('/auth/login', (req, res) => {
+  const { email, password } = req.body;
+  const user = users.find((u) => u.email === email && u.password === password);
+  if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+  const token = generateToken(user);
+  res.json({ user: { id: user.id, email: user.email, displayName: user.displayName, role: user.role }, token });
+});
+
+// Subjects
+// Only users with role instructor or admin can create subjects
+app.get('/subjects', authMiddleware, (req, res) => {
+  res.json(subjects);
+});
+
+app.post('/subjects', authMiddleware, requireRole('instructor', 'admin'), (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'Missing subject name' });
+  const s = { id: randomUUID(), name };
+  subjects.push(s);
+  res.status(201).json(s);
+});
+
+// Sessions
+// Only instructors and admins can create sessions
+app.post('/sessions', authMiddleware, requireRole('instructor', 'admin'), (req, res) => {
+  const { subjectId, start, end } = req.body;
+  if (!subjectId || !start) return res.status(400).json({ error: 'Missing subjectId or start' });
+  const s = { id: randomUUID(), subjectId, start, end: end || null, createdBy: req.user.id || null };
+  sessions.push(s);
+  res.status(201).json(s);
+});
+
+// Anyone authenticated can list sessions; optionally filter by createdBy for instructors
+app.get('/sessions', authMiddleware, (req, res) => {
+  res.json(sessions);
+});
+
+app.get('/sessions/:id/attendance', authMiddleware, (req, res) => {
+  const id = req.params.id;
+  res.json(attendance[id] || []);
+});
+
+// Mark attendance: any authenticated student can mark themself present;
+// instructors/admins can mark attendance for any user by sending userId in the body
+app.post('/sessions/:id/attendance', authMiddleware, (req, res) => {
+  const id = req.params.id;
+  const actorId = req.user.id || req.user.raw?.id || null;
+  if (!actorId) return res.status(401).json({ error: 'Missing user id' });
+
+  // If instructor or admin provided a userId in body, allow marking for that user
+  let targetUserId = actorId;
+  if (req.body.userId) {
+    // Only instructor or admin can mark for another user
+    if (!['instructor', 'admin'].includes(req.user.role)) {
+      return res.status(403).json({ error: 'Forbidden: cannot mark attendance for other users' });
+    }
+    targetUserId = req.body.userId;
+  }
+
+  const list = attendance[id] || [];
+  const record = { id: randomUUID(), userId: targetUserId, present: true, timestamp: new Date().toISOString() };
+  list.push(record);
+  attendance[id] = list;
+  res.status(201).json(record);
+});
+
+// Admin-only endpoint to list users
+// If Supabase profiles table is available, list profiles; otherwise return in-memory users
+app.get('/admin/users', authMiddleware, requireRole('admin'), async (req, res) => {
+  if (supabaseAdmin) {
+    try {
+      const { data, error } = await supabaseAdmin.from('profiles').select('*');
+      if (error) return res.status(500).json({ error: 'Failed to list users' });
+      return res.json(data);
+    } catch (err) {
+      console.error('admin/users error', err);
+      return res.status(500).json({ error: 'Failed to list users' });
+    }
+  }
+  return res.json(users.map((u) => ({ id: u.id, email: u.email, displayName: u.displayName, role: u.role })));
+});
+
+// Utility endpoint to promote a user role (admin only)
+// If Supabase profiles table is available, update it; otherwise update in-memory users
+app.post('/admin/users/:id/promote', authMiddleware, requireRole('admin'), async (req, res) => {
+  const id = req.params.id;
+  const { role } = req.body;
+  if (!role) return res.status(400).json({ error: 'Missing role' });
+
+  if (supabaseAdmin) {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from('profiles')
+        .update({ role })
+        .eq('id', id)
+        .select();
+
+      if (error) return res.status(500).json({ error: 'Update failed' });
+      if (!data || data.length === 0) return res.status(404).json({ error: 'User not found' });
+
+      return res.json({ id: id, role: data[0].role });
+    } catch (err) {
+      console.error('promote error', err);
+      return res.status(500).json({ error: 'Update failed' });
+    }
+  }
+
+  const user = users.find((u) => u.id === id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  user.role = role;
+  res.json({ id: user.id, role: user.role });
+});
+
+// Start server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server listening at http://localhost:${PORT}`);
+  console.log(`API listening on port ${PORT}`);
+});

@@ -1,0 +1,447 @@
+// index.js
+// Minimal backend single-file replacement for your MVP.
+// - Demo auth (JWT), local JSON persistence (data.json)
+// - Routes: /auth/register, /auth/login, /sessions, /sessions/:id/attendance
+// - Designed for local development and demo only.
+
+import express from "express";
+import fs from "fs";
+import path from "path";
+import { randomUUID } from "crypto";
+import jwt from "jsonwebtoken";
+import bodyParser from "body-parser";
+
+const app = express();
+app.use(bodyParser.json());
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  next();
+});
+
+const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || "change_this_for_prod";
+const DATA_FILE = path.resolve("./data.json");
+
+// --- Load / save store
+let store = { users: [], sessions: [], attendance: [], exportedAt: Date.now() };
+
+function loadStore() {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      const raw = fs.readFileSync(DATA_FILE, "utf8") || "{}";
+      const parsed = JSON.parse(raw);
+      store.users = Array.isArray(parsed.users) ? parsed.users : [];
+      store.sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
+      store.attendance = Array.isArray(parsed.attendance) ? parsed.attendance : [];
+      store.exportedAt = parsed.exportedAt || Date.now();
+    } else {
+      saveStore();
+    }
+  } catch (e) {
+    console.error("loadStore error", e);
+    store = { users: [], sessions: [], attendance: [], exportedAt: Date.now() };
+    saveStore();
+  }
+}
+
+function saveStore() {
+  try {
+    store.exportedAt = Date.now();
+    fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2));
+  } catch (e) {
+    console.error("saveStore error", e);
+  }
+}
+
+loadStore();
+
+// --- Helpers
+function signToken(payload) {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: "30d" });
+}
+
+function verifyToken(token) {
+  return jwt.verify(token, JWT_SECRET);
+}
+
+// --- DB helper functions using local store
+async function createUser({ email, password, displayName, role = "student" }) {
+  const existing = store.users.find((u) => u.email === email);
+  if (existing) return null;
+  const user = {
+    id: randomUUID(),
+    email,
+    password: password || null,
+    displayName: displayName || email,
+    role,
+    createdAt: new Date().toISOString(),
+  };
+  store.users.push(user);
+  saveStore();
+  return user;
+}
+
+async function findUserByEmail(email) {
+  return store.users.find((u) => u.email === email) || null;
+}
+
+async function createSessionDb({ subjectId, start, end, createdBy }) {
+  const s = {
+    id: randomUUID(),
+    subjectId,
+    start: start || null,
+    end: end || null,
+    createdBy: createdBy || null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  store.sessions.push(s);
+  saveStore();
+  return s;
+}
+
+async function listSessionsDb() {
+  return store.sessions.slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+}
+
+async function getAttendanceDb(sessionId) {
+  return (store.attendance || []).filter((r) => r.sessionId === sessionId).sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+}
+
+async function createAttendanceDb({ sessionId, userId, present = true }) {
+  const rec = {
+    id: randomUUID(),
+    sessionId,
+    userId,
+    present,
+    timestamp: new Date().toISOString(),
+  };
+  store.attendance = Array.isArray(store.attendance) ? store.attendance : [];
+  store.attendance.push(rec);
+  saveStore();
+  return rec;
+}
+
+// --- Auth endpoints
+app.post("/auth/register", async (req, res) => {
+  const { email, password, displayName, role } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: "Missing email or password" });
+  const user = await createUser({ email, password, displayName, role });
+  if (!user) return res.status(409).json({ error: "User already exists" });
+  const token = signToken({ id: user.id, email: user.email, role: user.role });
+  return res.json({ user: { id: user.id, email: user.email, displayName: user.displayName, role: user.role }, token });
+});
+
+app.post("/auth/login", async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: "Missing email or password" });
+  const user = await findUserByEmail(email);
+  if (!user || user.password !== password) return res.status(401).json({ error: "Invalid credentials" });
+  const token = signToken({ id: user.id, email: user.email, role: user.role });
+  return res.json({ user: { id: user.id, email: user.email, displayName: user.displayName, role: user.role }, token });
+});
+
+// --- Auth middleware
+function authMiddleware(req, res, next) {
+  const header = req.headers.authorization || "";
+  if (!header.startsWith("Bearer ")) return res.status(401).json({ error: "Missing authorization" });
+  const token = header.slice("Bearer ".length);
+  try {
+    const payload = verifyToken(token);
+    req.user = payload;
+    return next();
+  } catch (e) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+}
+// --- Role management endpoints (Owner, Super Admin, Admin)
+
+// Helper: require role
+function requireRole(role) {
+  return (req, res, next) => {
+    if (!req.user || req.user.role !== role) return res.status(403).json({ error: "Forbidden" });
+    return next();
+  };
+}
+
+// Owner can create a Super Admin
+app.post("/auth/create-super-admin", authMiddleware, requireRole("owner"), async (req, res) => {
+  try {
+    const { email, password, displayName } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: "Missing fields" });
+    const user = await createUser({ email, password, displayName, role: "super_admin" });
+    if (!user) return res.status(409).json({ error: "User already exists" });
+    return res.json({ user: { id: user.id, email: user.email, role: user.role } });
+  } catch (e) {
+    console.error("create-super-admin error", e);
+    return res.status(500).json({ error: "Failed to create super admin" });
+  }
+});
+
+// Owner or Super Admin can create Admins
+app.post("/auth/create-admin", authMiddleware, async (req, res) => {
+  try {
+    if (!req.user || (req.user.role !== "owner" && req.user.role !== "super_admin")) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const { email, password, displayName } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: "Missing fields" });
+    const user = await createUser({ email, password, displayName, role: "admin" });
+    if (!user) return res.status(409).json({ error: "User already exists" });
+    return res.json({ user: { id: user.id, email: user.email, role: user.role } });
+  } catch (e) {
+    console.error("create-admin error", e);
+    return res.status(500).json({ error: "Failed to create admin" });
+  }
+});
+// --- Course canonicalization and session validation
+
+
+// Ensure data.json has courses array
+function ensureCourses() {
+  const p = './data.json';
+  const j = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8') || '{}') : {};
+  j.courses = Array.isArray(j.courses) ? j.courses : [];
+  fs.writeFileSync(p, JSON.stringify(j, null, 2));
+}
+ensureCourses();
+
+// Create course helper
+async function createCourse({ code, name, createdBy }) {
+  if (!code || !name) return null;
+  const p = './data.json';
+  const j = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8') || '{}') : {};
+  j.courses = Array.isArray(j.courses) ? j.courses : [];
+  if (j.courses.find(c => c.code === code)) return null;
+  const c = { id: crypto.randomUUID(), code, name, createdBy, createdAt: new Date().toISOString() };
+  j.courses.push(c);
+  fs.writeFileSync(p, JSON.stringify(j, null, 2));
+  return c;
+}
+
+// Find course by code or id
+function findCourseByCode(code) {
+  const p = './data.json';
+  if (!fs.existsSync(p)) return null;
+  const j = JSON.parse(fs.readFileSync(p, 'utf8') || '{}');
+  j.courses = Array.isArray(j.courses) ? j.courses : [];
+  return j.courses.find(c => c.code === code || c.id === code) || null;
+}
+
+// Middleware to validate session creation body (normalized)
+function validateSessionBody(req, res, next) {
+  const body = req.body || {};
+  // Require either courseCode or subjectId or subject_id
+  if (!body.courseCode && !body.subjectId && !body.subject_id) {
+    return res.status(400).json({ error: "Missing courseCode or subjectId" });
+  }
+  // If courseCode provided, resolve to course and attach both field variants
+  if (body.courseCode) {
+    const course = findCourseByCode(body.courseCode);
+    if (!course) return res.status(400).json({ error: "Unknown courseCode. Create course first." });
+    req.body.subjectId = course.id;
+    req.body.subject_id = course.id;
+    req.body.subjectName = course.name;
+  } else if (body.subjectId || body.subject_id) {
+    // Normalize incoming subject id to both variants
+    const id = body.subjectId || body.subject_id;
+    req.body.subjectId = id;
+    req.body.subject_id = id;
+    // Optionally attach subjectName if course exists
+    const course = findCourseByCode(id);
+    if (course) req.body.subjectName = course.name;
+  }
+  // Validate start presence and normalize name
+  if (!body.start && !body.startTime && !body.start_at) {
+    return res.status(400).json({ error: "Missing start date/time" });
+  }
+  req.body.start = body.start || body.startTime || body.start_at;
+  return next();
+}
+
+// Expose helpers for other routes if needed
+app.post('/courses', authMiddleware, (req, res) => {
+  try {
+    const user = req.user || {};
+    if (!user || (user.role !== 'owner' && user.role !== 'super_admin' && user.role !== 'admin')) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const { code, name } = req.body || {};
+    if (!code || !name) return res.status(400).json({ error: 'Missing code or name' });
+    createCourse({ code: code.trim(), name: name.trim(), createdBy: user.id }).then(c => {
+      if (!c) return res.status(409).json({ error: 'Course code already exists' });
+      return res.json({ course: c });
+    }).catch(e => {
+      console.error('createCourse error', e);
+      return res.status(500).json({ error: 'Failed to create course' });
+    });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/courses/:code', authMiddleware, (req, res) => {
+  const code = req.params.code;
+  const c = findCourseByCode(code);
+  if (!c) return res.status(404).json({ error: 'Not found' });
+  return res.json({ course: c });
+});
+
+// Attach the session validation middleware to your existing sessions POST route.
+// Create session (normalized, uses validateSessionBody)
+// Replace the existing app.post("/sessions" handler with this normalized handler
+app.post("/sessions", authMiddleware, validateSessionBody, async (req, res) => {
+  try {
+    const fs = (await import('fs')).default;
+    const crypto = (await import('crypto')).default;
+    const p = './data.json';
+    const body = req.body || {};
+    const creator = req.user && req.user.id ? req.user.id : null;
+
+    // validateSessionBody will normalize courseCode -> subjectId and start
+    const subjectId = body.subjectId || body.subject_id;
+    const start = body.start;
+    const end = body.end || null;
+
+    if (!subjectId || !start) return res.status(400).json({ error: 'Missing subjectId or start' });
+
+    const data = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8') || '{}') : {};
+    data.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+
+    const session = {
+      id: crypto.randomUUID(),
+      subject_id: subjectId,
+      subjectId: subjectId,
+      start,
+      end,
+      created_by: creator,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+
+    data.sessions.push(session);
+    fs.writeFileSync(p, JSON.stringify(data, null, 2));
+    return res.json({ session });
+  } catch (e) {
+    console.error('create session error', e);
+    return res.status(500).json({ error: 'Failed to create session' });
+  }
+});
+
+// --- Routes: attendance
+app.get("/sessions/:id/attendance", authMiddleware, async (req, res) => {
+  const sessionId = req.params.id;
+  try {
+    const rows = await getAttendanceDb(sessionId);
+    return res.json(rows);
+  } catch (e) {
+    console.error("get attendance error", e);
+    return res.status(500).json({ error: "Failed to get attendance" });
+  }
+});
+
+app.post("/sessions/:id/attendance", authMiddleware, async (req, res) => {
+  const sessionId = req.params.id;
+  const { userId } = req.body || {};
+  try {
+    const callerId = req.user && req.user.id;
+    let targetUserId = callerId;
+    if (userId && req.user && req.user.role === "instructor") {
+      targetUserId = userId;
+    }
+    const exists = store.sessions.find((s) => s.id === sessionId);
+    if (!exists) return res.status(404).json({ error: "Session not found" });
+
+    const rec = await createAttendanceDb({ sessionId, userId: targetUserId, present: true });
+    return res.json(rec);
+  } catch (e) {
+    console.error("create attendance error", e);
+    return res.status(500).json({ error: "Failed to mark attendance" });
+  }
+});
+
+// --- Health
+app.get("/health", (req, res) => res.json({ ok: true, env: { jwtSecret: !!process.env.JWT_SECRET } }));
+
+// GET single session by id (returns JSON session or 404)
+app.get('/sessions/:id', authMiddlewareOptional, async (req, res) => {
+  try {
+    const fs = (await import('fs')).default;
+    const p = './data.json';
+    const id = req.params.id;
+    const data = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8') || '{}') : {};
+    data.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+    const session = data.sessions.find(s => s.id === id || s.sessionId === id);
+    if (!session) return res.status(404).json({ error: 'Not found' });
+    return res.json({ session });
+  } catch (e) {
+    console.error('get session error', e);
+    return res.status(500).json({ error: 'Failed to read session' });
+  }
+});
+
+
+// -// Attendance: accept sessionId or courseCode+start (canonicalize) and record attendance
+app.post('/attendance/mark', authMiddleware, async (req, res) => {
+  try {
+    const fs = (await import('fs')).default;
+    const crypto = (await import('crypto')).default;
+    const p = './data.json';
+    const body = req.body || {};
+
+    // Resolve sessionId from sessionId or courseCode+start
+    let sessionId = body.sessionId || body.session_id;
+    if (!sessionId && body.courseCode && body.start) {
+      const course = findCourseByCode(body.courseCode);
+      if (!course) return res.status(400).json({ error: 'Unknown courseCode' });
+      const data = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8') || '{}') : {};
+      data.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+      const found = data.sessions.find(s => (s.subject_id === course.id || s.subjectId === course.id) && (s.start === body.start));
+      if (!found) return res.status(404).json({ error: 'Session not found for courseCode + start' });
+      sessionId = found.id || found.sessionId;
+    }
+    if (!sessionId) return res.status(400).json({ error: 'Missing sessionId or (courseCode and start)' });
+
+    const userId = body.userId || body.user_id || (req.user && req.user.id);
+    if (!userId) return res.status(400).json({ error: 'Missing userId' });
+
+    const present = typeof body.present === 'boolean' ? body.present : true;
+    const data = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8') || '{}') : {};
+    data.attendance = Array.isArray(data.attendance) ? data.attendance : [];
+
+    const attendance = {
+      id: crypto.randomUUID(),
+      sessionId,
+      userId,
+      present,
+      timestamp: new Date().toISOString()
+    };
+
+    data.attendance.push(attendance);
+    fs.writeFileSync(p, JSON.stringify(data, null, 2));
+    return res.json({ attendance });
+  } catch (e) {
+    console.error('mark attendance error', e);
+    return res.status(500).json({ error: 'Failed to mark attendance' });
+  }
+});
+
+function findCourseByCode(code) {
+  try {
+    const fs = require('fs');
+    const p = './data.json';
+    const data = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8') || '{}') : {};
+    data.courses = Array.isArray(data.courses) ? data.courses : [];
+    return data.courses.find(c => c.code === code || c.code?.toLowerCase() === code?.toLowerCase()) || null;
+  } catch (e) {
+    console.error('findCourseByCode error', e);
+    return null;
+  }
+}
+
+-- Start server
+app.listen(PORT, () => {
+  console.log(`Server listening at http://localhost:${PORT}`);
+  console.log(`API listening on port ${PORT}`);
+});

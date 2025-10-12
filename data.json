@@ -1,5 +1,95 @@
 {
-  "exportedAt": 1759143243579,
-  "sessions": [],
-  "attendance": {}
+  "users": [
+    {
+      "id": "afaffc27-86a3-4829-a961-069b199b71b8",
+      "email": "instructor_final@example.com",
+      "password": "Passw0rd!",
+      "displayName": "Final Instructor",
+      "role": "instructor",
+      "createdAt": "2025-10-06T06:31:46.355Z"
+    },
+    {
+      "id": "740401df-53da-4025-b220-a23d3a276138",
+      "email": "owner@example.com",
+      "password": "OwnerP@ss1",
+      "displayName": "Platform Owner",
+      "role": "owner",
+      "createdAt": "2025-10-06T18:58:02.760Z"
+    },
+    {
+      "id": "af54e111-76db-4d06-bfe0-38c3c8ad5248",
+      "email": "superadmin@example.com",
+      "password": "SuperP@ss1",
+      "displayName": "Super Admin",
+      "role": "super_admin",
+      "createdAt": "2025-10-06T19:02:31.296Z"
+    }
+  ],
+  "sessions": [
+    {
+      "id": "aabd8ff6-58c4-44a3-b174-34e4736ab4f2",
+      "subject_id": "9fad943c-701c-4a14-b4a9-ca302461e39c",
+      "start": "2025-10-10T09:00:00Z",
+      "end": null,
+      "created_by": "a5859af0-e9ac-4263-b6f4-12882e75bdd4",
+      "created_at": "2025-10-06T04:35:03.234Z",
+      "updated_at": "2025-10-06T04:35:03.235Z"
+    },
+    {
+      "id": "1e8fd1b9-39b3-4aa6-ba2c-83b43ce7e8cf",
+      "subject_id": "9fad943c-701c-4a14-b4a9-ca302461e39c",
+      "start": "2025-10-10T09:00:00Z",
+      "end": null,
+      "created_by": "827e0d99-0110-478a-bdf9-eab2deaa42bb",
+      "created_at": "2025-10-06T05:22:48.367Z",
+      "updated_at": "2025-10-06T05:22:48.367Z"
+    },
+    {
+      "id": "15a0a14a-b9fb-4ea6-88d1-2d4c2db3df93",
+      "subjectId": "9fad943c-701c-4a14-b4a9-ca302461e39c",
+      "start": "2025-10-10T09:00:00Z",
+      "end": null,
+      "createdBy": "afaffc27-86a3-4829-a961-069b199b71b8",
+      "createdAt": "2025-10-06T06:37:17.713Z",
+      "updatedAt": "2025-10-06T06:37:17.713Z"
+    },
+    {
+      "id": "06558766-35a5-4bc2-b92b-f13a3503d7c4",
+      "subjectId": "7eed276c-d09a-44f2-8671-81b49d7c52f0",
+      "start": "2025-10-10T09:00:00Z",
+      "end": null,
+      "createdBy": "740401df-53da-4025-b220-a23d3a276138",
+      "createdAt": "2025-10-07T04:01:03.111Z",
+      "updatedAt": "2025-10-07T04:01:03.112Z"
+    },
+    {
+      "id": "f4446186-08bf-4b6b-93f9-4ff3452cc661",
+      "subject_id": "38f7f698-647d-41c7-a4c9-bd593da3bfe6",
+      "subjectId": "38f7f698-647d-41c7-a4c9-bd593da3bfe6",
+      "start": "2025-10-10T09:00:00Z",
+      "end": null,
+      "created_by": "740401df-53da-4025-b220-a23d3a276138",
+      "created_at": "2025-10-07T04:42:21.834Z",
+      "updated_at": "2025-10-07T04:42:21.834Z"
+    }
+  ],
+  "attendance": [
+    {
+      "id": "b1de4c3f-5646-4446-b4f0-39cec45319bd",
+      "sessionId": "15a0a14a-b9fb-4ea6-88d1-2d4c2db3df93",
+      "userId": "afaffc27-86a3-4829-a961-069b199b71b8",
+      "present": true,
+      "timestamp": "2025-10-06T06:41:50.748Z"
+    }
+  ],
+  "exportedAt": 1759809663112,
+  "courses": [
+    {
+      "id": "38f7f698-647d-41c7-a4c9-bd593da3bfe6",
+      "code": "CS101",
+      "name": "Computer Science 101",
+      "createdBy": "740401df-53da-4025-b220-a23d3a276138",
+      "createdAt": "2025-10-07T04:41:40.289Z"
+    }
+  ]
 }

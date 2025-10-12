@@ -1,0 +1,24 @@
+{
+  "exportedAt": 1759143243579,
+  "sessions": [
+    {
+      "id": "aabd8ff6-58c4-44a3-b174-34e4736ab4f2",
+      "subject_id": "9fad943c-701c-4a14-b4a9-ca302461e39c",
+      "start": "2025-10-10T09:00:00Z",
+      "end": null,
+      "created_by": "a5859af0-e9ac-4263-b6f4-12882e75bdd4",
+      "created_at": "2025-10-06T04:35:03.234Z",
+      "updated_at": "2025-10-06T04:35:03.235Z"
+    },
+    {
+      "id": "1e8fd1b9-39b3-4aa6-ba2c-83b43ce7e8cf",
+      "subject_id": "9fad943c-701c-4a14-b4a9-ca302461e39c",
+      "start": "2025-10-10T09:00:00Z",
+      "end": null,
+      "created_by": "827e0d99-0110-478a-bdf9-eab2deaa42bb",
+      "created_at": "2025-10-06T05:22:48.367Z",
+      "updated_at": "2025-10-06T05:22:48.367Z"
+    }
+  ],
+  "attendance": {}
+}
