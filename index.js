@@ -1,4 +1,13 @@
-﻿require('dotenv').config();
+﻿// Force IPv4-first DNS resolution immediately
+require("dns").setDefaultResultOrder("ipv4first");
+// allow TLS for managed certs while debugging
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = process.env.NODE_TLS_REJECT_UNAUTHORIZED || "0";
+// Force IPv4-first DNS resolution immediately
+require('dns').setDefaultResultOrder('ipv4first');
+// allow self-signed/managed certs for TLS if your environment needs it (only while debugging)
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = process.env.NODE_TLS_REJECT_UNAUTHORIZED || '0';
+
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
@@ -492,4 +501,5 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
 });
+
 
