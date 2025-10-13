@@ -1,11 +1,10 @@
 ﻿// Force IPv4-first DNS resolution immediately
 require('dns').setDefaultResultOrder('ipv4first');
-// allow TLS for managed certs while debugging (keep during troubleshooting only)
+// Allow TLS for managed certs while debugging (remove or tighten for production)
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = process.env.NODE_TLS_REJECT_UNAUTHORIZED || '0';
 
 require('dotenv').config();
 const express = require('express');
-const bodyParser = require('body-parser');
 const cors = require('cors');
 const { Pool } = require('pg');
 const { randomUUID } = require('crypto');
@@ -17,13 +16,13 @@ const { verifyToken, requireAuth, requireRole } = require('./middleware/auth');
 
 const app = express();
 
-// SAFE: capture/sanitize raw JSON in verify hook (no stream replacement)
+// ---------- SAFE raw JSON sanitize helper (used in express.json verify) ----------
 function sanitizeRawBuffer(buf) {
   if (!buf || !buf.length) return buf;
-  // strip UTF-8 BOM
+  // strip UTF-8 BOM if present
   let start = 0;
   if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) start = 3;
-  // find first JSON starter char
+  // find first JSON starting char '{' or '['
   const rest = buf.slice(start);
   const iBrace = rest.indexOf(0x7b); // '{'
   const iBracket = rest.indexOf(0x5b); // '['
@@ -34,16 +33,16 @@ function sanitizeRawBuffer(buf) {
   return buf.slice(start);
 }
 
-// Use body-parser json with verify to capture the raw bytes
+// ---------- middlewares ----------
 app.use(cors());
-app.use(bodyParser.json({
+app.use(express.json({
   limit: '1mb',
   verify: (req, res, buf) => {
     try {
       const clean = sanitizeRawBuffer(buf);
       req._rawSanitized = clean.toString('utf8');
-      // optional debug: uncomment during troubleshooting
-      // console.log('BODY-VERIFY: len', buf.length, 'cleanLen', clean.length, 'preview', req._rawSanitized.slice(0, 120));
+      // optional debug:
+      // console.log('RAW-VERIFY: len', buf.length, 'cleanLen', clean.length, 'preview', req._rawSanitized.slice(0,120));
     } catch (err) {
       console.error('RAW-VERIFY-ERR', err);
     }
@@ -52,6 +51,7 @@ app.use(bodyParser.json({
 app.use(express.urlencoded({ extended: false }));
 app.use(verifyToken);
 
+// ---------- config ----------
 const PORT = process.env.PORT || 3000;
 
 if (!process.env.DATABASE_URL) {
@@ -59,12 +59,10 @@ if (!process.env.DATABASE_URL) {
   process.exit(1);
 }
 
-// Configure PG pool; trust self-signed managed certs during debugging via NODE_TLS_REJECT_UNAUTHORIZED
+// Configure PG pool; allow non-strict SSL behavior while debugging via NODE_TLS_REJECT_UNAUTHORIZED
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // If your DB host requires SSL and you get certificate issues, this keeps connections working for debug.
-  // Remove or set rejectUnauthorized: true in production.
-  ssl: process.env.DATABASE_URL.includes('postgres') ? { rejectUnauthorized: process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '0' } : false
+  ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.startsWith('postgres') ? { rejectUnauthorized: process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '0' } : false
 });
 
 // ---------- RATE LIMITERS ----------
@@ -93,6 +91,7 @@ function signToken(payload) {
   const secret = process.env.JWT_SECRET || 'dev-secret';
   return jwt.sign(payload, secret, { expiresIn: '12h' });
 }
+
 function requireInstitute(req, res, next) {
   const iid = req.user && req.user.institute_id;
   if (!iid && !req.body.institute_id && !req.query.institute_id) {
@@ -402,6 +401,7 @@ app.post('/qr/invalidate', qrInvalidateLimiter, requireAuth, asyncHandler(async 
   await audit(actor.sub, 'invalidate_qr', 'session_qr', session_id, { invalidated: del.rows.length });
   res.json({ invalidated: del.rows.length, rows: del.rows });
 }));
+
 // ---------- ATTENDANCE ----------
 app.post('/attendance', asyncHandler(async (req, res) => {
   const { session_id, student_id, attended, pin } = req.body || {};
