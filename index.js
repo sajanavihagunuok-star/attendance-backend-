@@ -1,4 +1,4 @@
-require('dotenv').config();
+﻿require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
@@ -507,3 +507,4 @@ function listRoutes(){
   }catch(e){ console.log('Route listing failed', e); }
 }
 setTimeout(listRoutes, 500);
+
