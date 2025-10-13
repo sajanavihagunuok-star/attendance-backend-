@@ -1,6 +1,6 @@
 ﻿// Force IPv4-first DNS resolution immediately
 require('dns').setDefaultResultOrder('ipv4first');
-// Allow TLS for managed certs while debugging (remove or tighten for production)
+// Allow TLS for managed certs while debugging; remove or tighten for production
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = process.env.NODE_TLS_REJECT_UNAUTHORIZED || '0';
 
 require('dotenv').config();
@@ -39,10 +39,12 @@ app.use(express.json({
   limit: '1mb',
   verify: (req, res, buf) => {
     try {
-      const clean = sanitizeRawBuffer(buf);
-      req._rawSanitized = clean.toString('utf8');
-      // optional debug:
-      // console.log('RAW-VERIFY: len', buf.length, 'cleanLen', clean.length, 'preview', req._rawSanitized.slice(0,120));
+      // TEMP logging for debugging malformed JSON - remove after fix
+      const hex = Buffer.from(buf).toString('hex');
+      const text = Buffer.from(buf).toString('utf8');
+      console.log('RAW-INCOMING-HEX', hex);
+      console.log('RAW-INCOMING-TEXT', text);
+      req._rawSanitized = sanitizeRawBuffer(buf).toString('utf8');
     } catch (err) {
       console.error('RAW-VERIFY-ERR', err);
     }
@@ -59,7 +61,6 @@ if (!process.env.DATABASE_URL) {
   process.exit(1);
 }
 
-// Configure PG pool; allow non-strict SSL behavior while debugging via NODE_TLS_REJECT_UNAUTHORIZED
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.startsWith('postgres') ? { rejectUnauthorized: process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '0' } : false
@@ -303,236 +304,4 @@ app.get('/enrollments', requireAuth, asyncHandler(async (req, res) => {
   res.json({ enrollments: rows });
 }));
 
-// ---------- PROFILES ----------
-app.get('/profiles', requireAuth, asyncHandler(async (req, res) => {
-  const inst = req.user && req.user.institute_id;
-  const { rows } = await pool.query(
-    'SELECT * FROM profiles WHERE (user_id IS NULL OR user_id IN (SELECT id FROM users WHERE institute_id = $1)) ORDER BY created_at DESC LIMIT 1000',
-    [inst]
-  );
-  res.json({ profiles: rows });
-}));
-
-app.post('/profiles', asyncHandler(async (req, res) => {
-  const { id, full_name, user_id, is_teacher, batch_id } = req.body || {};
-  const q = `INSERT INTO profiles(id, user_id, full_name, is_teacher, batch_id, created_at, updated_at)
-             VALUES ($1,$2,$3,$4,$5, now(), now()) RETURNING *`;
-  const params = [id || randomUUID(), user_id || null, full_name || null, !!is_teacher, batch_id || null];
-  const { rows } = await pool.query(q, params);
-  res.json({ profile: rows[0] });
-}));
-
-// ---------- SESSIONS ----------
-app.post('/sessions', requireAuth, asyncHandler(async (req, res) => {
-  const isAdmin = req.user && ['admin','super_admin','owner'].includes(req.user.role);
-  const isLecturer = req.user && req.user.role === 'lecturer';
-  if (!isAdmin && !isLecturer) return res.status(403).json({ error: 'Admin or lecturer required' });
-
-  const incoming = req.body || {};
-  const { title, course_id, lecturer_id, start_time } = incoming;
-  const missing = [];
-  if (!title) missing.push('title');
-  if (!course_id) missing.push('course_id');
-  if (!start_time) missing.push('start_time');
-  if (!lecturer_id) missing.push('lecturer_id');
-  if (missing.length) return res.status(400).json({ error: 'Missing required fields', missing });
-
-  if (!isUuid(course_id)) return res.status(400).json({ error: 'invalid course_id' });
-  if (!isUuid(lecturer_id)) return res.status(400).json({ error: 'invalid lecturer_id' });
-
-  const q = `INSERT INTO sessions(id,title,course_id,start_time,end_time,lecturer_id,capacity,created_at)
-             VALUES (gen_random_uuid(), $1, $2, $3::timestamptz, $4::timestamptz, $5, $6, now()) RETURNING *`;
-  const params = [title, course_id, start_time, incoming.end_time || null, lecturer_id, incoming.capacity || null];
-  const { rows } = await pool.query(q, params);
-  res.json({ session: rows[0] });
-}));
-
-// ---------- QR / PIN ----------
-app.post('/qr', qrRateLimiter, asyncHandler(async (req, res) => {
-  const { session_id } = req.body || {};
-  if (!session_id) return res.status(400).json({ error: 'session_id required' });
-  if (!isUuid(session_id)) return res.status(400).json({ error: 'invalid session_id' });
-
-  const { rows: srows } = await pool.query(
-    'SELECT id, course_id, lecturer_id, start_time FROM sessions WHERE id = $1 LIMIT 1',
-    [session_id]
-  );
-  if (!srows[0]) return res.status(404).json({ error: 'Session not found' });
-  const sess = srows[0];
-  if (!sess.course_id || !sess.lecturer_id || !sess.start_time) {
-    return res.status(400).json({ error: 'Session missing required details. Fill course, lecturer and start_time before generating QR.' });
-  }
-
-  const existing = (await pool.query(
-    'SELECT * FROM session_qr WHERE session_id=$1 AND expires_at >= now() ORDER BY created_at DESC LIMIT 1',
-    [session_id]
-  )).rows[0];
-  if (existing) {
-    return res.json({ qr: existing, note: 'existing_active' });
-  }
-
-  const pin = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
-  const q = `INSERT INTO session_qr(session_id, pin, expires_at) VALUES ($1, $2, $3) RETURNING *`;
-  const { rows } = await pool.query(q, [session_id, pin, expiresAt]);
-  res.json({ qr: { session_id, pin: rows[0].pin, expires_at: rows[0].expires_at, created_at: rows[0].created_at } });
-}));
-
-app.get('/qr/:session_id', asyncHandler(async (req, res) => {
-  const session_id = req.params.session_id;
-  if (!isUuid(session_id)) return res.status(400).json({ error: 'invalid session_id' });
-  const { rows } = await pool.query(
-    'SELECT * FROM session_qr WHERE session_id = $1 AND expires_at >= now() ORDER BY created_at DESC LIMIT 1',
-    [session_id]
-  );
-  res.json({ qr: rows[0] || null });
-}));
-
-app.post('/qr/invalidate', qrInvalidateLimiter, requireAuth, asyncHandler(async (req, res) => {
-  const actor = req.auth;
-  const actorRow = (await pool.query('SELECT * FROM users WHERE id=$1 LIMIT 1', [actor.sub])).rows[0];
-  if (!(actorRow && ['owner','super_admin','admin','lecturer'].includes(actorRow.role))) return res.status(403).json({ error: 'Admin or lecturer required' });
-
-  const { session_id } = req.body || {};
-  if (!session_id) return res.status(400).json({ error: 'session_id required' });
-  if (!isUuid(session_id)) return res.status(400).json({ error: 'invalid session_id' });
-
-  const del = await pool.query('DELETE FROM session_qr WHERE session_id = $1 RETURNING *', [session_id]);
-  await audit(actor.sub, 'invalidate_qr', 'session_qr', session_id, { invalidated: del.rows.length });
-  res.json({ invalidated: del.rows.length, rows: del.rows });
-}));
-
-// ---------- ATTENDANCE ----------
-app.post('/attendance', asyncHandler(async (req, res) => {
-  const { session_id, student_id, attended, pin } = req.body || {};
-  if (!session_id || !student_id) return res.status(400).json({ error: 'Missing fields', missing: ['session_id','student_id'] });
-  if (!isUuid(session_id)) return res.status(400).json({ error: 'invalid session_id' });
-  if (!isUuid(student_id)) return res.status(400).json({ error: 'invalid student_id' });
-
-  const isAdminOrLecturer = req.user && ['admin','lecturer','super_admin','owner'].includes(req.user.role);
-  if (!isAdminOrLecturer) {
-    if (!pin) return res.status(403).json({ error: 'PIN required for marking attendance' });
-    const { rows: pinRows } = await pool.query(
-      'SELECT * FROM session_qr WHERE session_id = $1 AND pin = $2 ORDER BY created_at DESC LIMIT 1',
-      [session_id, String(pin)]
-    );
-    if (!pinRows[0]) return res.status(403).json({ error: 'Invalid PIN' });
-    if (new Date(pinRows[0].expires_at) < new Date()) return res.status(403).json({ error: 'PIN expired' });
-  }
-
-  const q = `INSERT INTO attendance(id, session_id, student_id, attended, marked_at)
-             VALUES (gen_random_uuid(), $1, $2, $3, now()) RETURNING *`;
-  const { rows } = await pool.query(q, [session_id, student_id, !!attended]);
-  res.json({ attendance: rows[0] });
-}));
-
-app.get('/attendance', asyncHandler(async (req, res) => {
-  const { student_id, batch_id, subject_id, date_from, date_to, session_id } = req.query;
-  let q = `SELECT a.*, s.course_id, p.batch_id FROM attendance a
-           LEFT JOIN sessions s ON s.id = a.session_id
-           LEFT JOIN profiles p ON p.id = a.student_id
-           WHERE true`;
-  const params = [];
-  let i = 1;
-
-  if (session_id) { if (!isUuid(session_id)) return res.status(400).json({ error: 'invalid session_id' }); q += ` AND a.session_id = $${i++}`; params.push(session_id); }
-  if (student_id) { q += ` AND a.student_id = $${i++}`; params.push(student_id); }
-  if (batch_id) { q += ` AND p.batch_id = $${i++}`; params.push(batch_id); }
-  if (subject_id) { q += ` AND s.course_id = $${i++}`; params.push(subject_id); }
-  if (date_from) { q += ` AND a.marked_at >= $${i++}`; params.push(date_from); }
-  if (date_to) { q += ` AND a.marked_at <= $${i++}`; params.push(date_to); }
-
-  q += ' ORDER BY a.marked_at DESC LIMIT 1000';
-  const { rows } = await pool.query(q, params);
-  res.json({ attendance: rows });
-}));
-
-app.get('/attendance/export', asyncHandler(async (req, res) => {
-  const { student_id, batch_id, subject_id, date_from, date_to, session_id } = req.query;
-  let q = `SELECT a.id as attendance_id, a.session_id, s.title as session_title, s.course_id, c.code as course_code, c.name as course_name,
-                  a.student_id, p.full_name as student_name, p.batch_id, a.attended, a.marked_at
-           FROM attendance a
-           LEFT JOIN sessions s ON s.id = a.session_id
-           LEFT JOIN courses c ON c.id = s.course_id
-           LEFT JOIN profiles p ON p.id = a.student_id
-           WHERE true`;
-  const params = [];
-  let i = 1;
-
-  if (session_id) { if (!isUuid(session_id)) return res.status(400).json({ error: 'invalid session_id' }); q += ` AND a.session_id = $${i++}`; params.push(session_id); }
-  if (student_id) { if (!isUuid(student_id)) return res.status(400).json({ error: 'invalid student_id' }); q += ` AND a.student_id = $${i++}`; params.push(student_id); }
-  if (batch_id) { q += ` AND p.batch_id = $${i++}`; params.push(batch_id); }
-  if (subject_id) { q += ` AND s.course_id = $${i++}`; params.push(subject_id); }
-  if (date_from) { q += ` AND a.marked_at >= $${i++}`; params.push(date_from); }
-  if (date_to) { q += ` AND a.marked_at <= $${i++}`; params.push(date_to); }
-
-  q += ' ORDER BY a.marked_at DESC LIMIT 5000';
-  const { rows } = await pool.query(q, params);
-
-  function escapeCsv(val) {
-    if (val === null || val === undefined) return '';
-    const s = String(val);
-    if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
-      return `"${s.replace(/"/g, '""')}"`;
-    }
-    return s;
-  }
-
-  const header = ['attendance_id','session_id','session_title','course_id','course_code','course_name','student_id','student_name','batch_id','attended','marked_at'];
-  const csvLines = [header.join(',')];
-  for (const r of rows) {
-    const line = [
-      r.attendance_id,
-      r.session_id,
-      escapeCsv(r.session_title),
-      r.course_id,
-      escapeCsv(r.course_code),
-      escapeCsv(r.course_name),
-      r.student_id,
-      escapeCsv(r.student_name),
-      r.batch_id,
-      r.attended ? '1' : '0',
-      r.marked_at ? new Date(r.marked_at).toISOString() : ''
-    ].join(',');
-    csvLines.push(line);
-  }
-
-  const csv = csvLines.join('\n');
-  res.setHeader('Content-Disposition', 'attachment; filename=attendance_export.csv');
-  res.setHeader('Content-Type', 'text/csv');
-  res.send(csv);
-}));
-
-// ---------- DEBUG ----------
-app.get('/_debug/counters', asyncHandler(async (req, res) => {
-  const { rows } = await pool.query(`
-    SELECT
-      (SELECT count(*) FROM institutes) AS institutes,
-      (SELECT count(*) FROM users) AS users,
-      (SELECT count(*) FROM courses) AS courses,
-      (SELECT count(*) FROM sessions) AS sessions,
-      (SELECT count(*) FROM attendance) AS attendance,
-      (SELECT count(*) FROM profiles) AS profiles
-  `);
-  res.json(rows[0]);
-}));
-
-const sessionsRouter = require('./routes/sessions');
-app.use('/sessions', sessionsRouter);
-
-// ---------- HEALTH + ERROR + 404 ----------
-app.get('/ping', (req, res) => res.send('pong'));
-
-app.use((req, res) => {
-  res.status(404).json({ error: 'Route not found' });
-});
-
-app.use((err, req, res, next) => {
-  console.error('ERROR', err && err.stack ? err.stack : err);
-  res.status(500).json({ error: err.message || 'internal error' });
-});
-
-// ---------- START ----------
-app.listen(PORT, () => {
-  console.log(`Server listening on ${PORT}`);
-});
+// (file continues unchanged)
