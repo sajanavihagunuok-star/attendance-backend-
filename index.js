@@ -494,19 +494,16 @@ app.get('/sessions', (req, res) => {
   return res.json({ ok: true, sessions: [] });
 });
 
-// Auto-added: smoke endpoint and route logging
+// Auto-added: smoke endpoint and corrected route logging
 app.get('/_smoke_sessions_unique_42', (req, res) => res.json({ ok: true, smoke: true }));
 
-// Print mounted routes on startup for debugging
 function listRoutes(){
   try{
     const routes = (app._router && app._router.stack) ? app._router.stack
       .filter(r => r.route && r.route.path)
-      .map(r => ${r.route.stack[0].method.toUpperCase()} ) : [];
+      .map(r => r.route.stack[0].method.toUpperCase() + ' ' + r.route.path) : [];
     console.log('MOUNTED ROUTES:');
     routes.forEach(r => console.log(r));
   }catch(e){ console.log('Route listing failed', e); }
 }
-
-// call after server starts (ensure your server log shows this)
 setTimeout(listRoutes, 500);
