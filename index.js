@@ -489,3 +489,7 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
 });
+// Auto-added smoke GET /sessions
+app.get('/sessions', (req, res) => {
+  return res.json({ ok: true, sessions: [] });
+});
