@@ -1,14 +1,11 @@
 ﻿// Force IPv4-first DNS resolution immediately
-require("dns").setDefaultResultOrder("ipv4first");
-// allow TLS for managed certs while debugging
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = process.env.NODE_TLS_REJECT_UNAUTHORIZED || "0";
-// Force IPv4-first DNS resolution immediately
 require('dns').setDefaultResultOrder('ipv4first');
-// allow self-signed/managed certs for TLS if your environment needs it (only while debugging)
+// allow TLS for managed certs while debugging (keep during troubleshooting only)
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = process.env.NODE_TLS_REJECT_UNAUTHORIZED || '0';
 
 require('dotenv').config();
 const express = require('express');
+const bodyParser = require('body-parser');
 const cors = require('cors');
 const { Pool } = require('pg');
 const { randomUUID } = require('crypto');
@@ -19,67 +16,42 @@ const asyncHandler = require('express-async-handler');
 const { verifyToken, requireAuth, requireRole } = require('./middleware/auth');
 
 const app = express();
-// TEMP resilient raw-body sanitizer — keep before express.json()
-app.use((req, res, next) => {
-  // only run for requests that may have a body
-  if (!['POST','PUT','PATCH','DELETE'].includes((req.method || '').toUpperCase())) return next();
 
-  const chunks = [];
-  let received = 0;
-  req.on('data', (c) => {
-    const buf = Buffer.isBuffer(c) ? c : Buffer.from(c);
-    chunks.push(buf);
-    received += buf.length;
-    // safety bail for enormous bodies
-    if (received > 2 * 1024 * 1024) { // 2MB
-      console.error('BODY-SANITIZER: body too large');
-      req.destroy();
-    }
-  });
+// SAFE: capture/sanitize raw JSON in verify hook (no stream replacement)
+function sanitizeRawBuffer(buf) {
+  if (!buf || !buf.length) return buf;
+  // strip UTF-8 BOM
+  let start = 0;
+  if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) start = 3;
+  // find first JSON starter char
+  const rest = buf.slice(start);
+  const iBrace = rest.indexOf(0x7b); // '{'
+  const iBracket = rest.indexOf(0x5b); // '['
+  let i = -1;
+  if (iBrace >= 0 && iBracket >= 0) i = Math.min(iBrace, iBracket);
+  else i = Math.max(iBrace, iBracket);
+  if (i >= 0) start = start + i;
+  return buf.slice(start);
+}
 
-  req.on('end', () => {
+// Use body-parser json with verify to capture the raw bytes
+app.use(cors());
+app.use(bodyParser.json({
+  limit: '1mb',
+  verify: (req, res, buf) => {
     try {
-      const buf = Buffer.concat(chunks || []);
-      // strip UTF-8 BOM if present
-      let start = 0;
-      if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) start = 3;
-      // if request accidentally contains garbage before JSON, find first { or [
-      const firstBrace = buf.slice(start).indexOf(0x7b); // '{'
-      const firstBracket = buf.slice(start).indexOf(0x5b); // '['
-      let firstJson = -1;
-      if (firstBrace >= 0 && firstBracket >= 0) firstJson = Math.min(firstBrace, firstBracket);
-      else firstJson = Math.max(firstBrace, firstBracket);
-      if (firstJson >= 0) start = start + firstJson;
-      const cleanBuf = buf.slice(start);
-      // optional debug (short preview) - remove after fix
-      console.log('BODY-SANITIZER: len', buf.length, 'cleanLen', cleanBuf.length, 'preview', cleanBuf.slice(0,120).toString());
-      // create a new readable stream for downstream parsers
-      const { Readable } = require('stream');
-      const s = new Readable();
-      s.push(cleanBuf);
-      s.push(null);
-      // copy minimal properties expected by body-parser
-      s.headers = req.headers;
-      s.method = req.method;
-      s.url = req.url;
-      // replace req's internal stream methods so express body-parser can read from it
-      req.socket = req.socket || s;
-      req._read = s._read?.bind(s);
-      req.read = s.read?.bind(s);
-      req.on = s.on?.bind(s);
-      req.pipe = s.pipe?.bind(s);
-      // attach the cleaned raw string for diagnostic access if needed
-      req._rawSanitized = cleanBuf.toString('utf8');
-      next();
+      const clean = sanitizeRawBuffer(buf);
+      req._rawSanitized = clean.toString('utf8');
+      // optional debug: uncomment during troubleshooting
+      // console.log('BODY-VERIFY: len', buf.length, 'cleanLen', clean.length, 'preview', req._rawSanitized.slice(0, 120));
     } catch (err) {
-      console.error('BODY-SANITIZER-ERROR', err);
-      // allow upstream to handle parse error normally
-      next();
+      console.error('RAW-VERIFY-ERR', err);
     }
-  });
+  }
+}));
+app.use(express.urlencoded({ extended: false }));
+app.use(verifyToken);
 
-  req.on('error', (e) => { console.error('BODY-SANITIZER-STREAM-ERR', e); next(); });
-});
 const PORT = process.env.PORT || 3000;
 
 if (!process.env.DATABASE_URL) {
@@ -87,27 +59,13 @@ if (!process.env.DATABASE_URL) {
   process.exit(1);
 }
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-// DEBUG: dump raw request body as hex for troubleshooting malformed JSON
-const http = require('http');
-if (!global.__RAW_BODY_LOGGER_ADDED) {
-  global.__RAW_BODY_LOGGER_ADDED = true;
-  const express = require('express');
-  const original = express.request;
-  // attach rawBody logger middleware insertion helper for earliest position
-  // the code below registers a middleware that buffers raw bytes then sets req.rawBodyHex
-  module.exports = (function() {
-    try {
-      const appRef = require('./index'); // safe no-op when index requires itself; ignore errors
-    } catch(e) { /* ignore */ }
-  })();
-}
-process.on('uncaughtException', (err) => { console.error('UNCAUGHT', err && err.stack || err); });
-app.use(cors());
-app.use(express.json());
-app.use(verifyToken);
-app.use(express.urlencoded({ extended: true }));
-app.get('/ping', (req, res) => res.send('pong'));
+// Configure PG pool; trust self-signed managed certs during debugging via NODE_TLS_REJECT_UNAUTHORIZED
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  // If your DB host requires SSL and you get certificate issues, this keeps connections working for debug.
+  // Remove or set rejectUnauthorized: true in production.
+  ssl: process.env.DATABASE_URL.includes('postgres') ? { rejectUnauthorized: process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '0' } : false
+});
 
 // ---------- RATE LIMITERS ----------
 const qrRateLimiter = rateLimit({
@@ -224,6 +182,7 @@ app.post('/auth/login', asyncHandler(async (req, res) => {
     token
   });
 }));
+
 // ---------- COURSES ----------
 app.post('/courses', requireAuth, asyncHandler(async (req, res) => {
   const actor = req.auth;
@@ -363,6 +322,7 @@ app.post('/profiles', asyncHandler(async (req, res) => {
   const { rows } = await pool.query(q, params);
   res.json({ profile: rows[0] });
 }));
+
 // ---------- SESSIONS ----------
 app.post('/sessions', requireAuth, asyncHandler(async (req, res) => {
   const isAdmin = req.user && ['admin','super_admin','owner'].includes(req.user.role);
@@ -576,5 +536,3 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
 });
-
-
