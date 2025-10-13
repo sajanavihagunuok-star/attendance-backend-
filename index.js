@@ -19,37 +19,66 @@ const asyncHandler = require('express-async-handler');
 const { verifyToken, requireAuth, requireRole } = require('./middleware/auth');
 
 const app = express();
-// Raw-body logger (temporary)
+// TEMP resilient raw-body sanitizer — keep before express.json()
 app.use((req, res, next) => {
+  // only run for requests that may have a body
+  if (!['POST','PUT','PATCH','DELETE'].includes((req.method || '').toUpperCase())) return next();
+
   const chunks = [];
-  req.on('data', (c) => chunks.push(Buffer.from(c)));
+  let received = 0;
+  req.on('data', (c) => {
+    const buf = Buffer.isBuffer(c) ? c : Buffer.from(c);
+    chunks.push(buf);
+    received += buf.length;
+    // safety bail for enormous bodies
+    if (received > 2 * 1024 * 1024) { // 2MB
+      console.error('BODY-SANITIZER: body too large');
+      req.destroy();
+    }
+  });
+
   req.on('end', () => {
     try {
       const buf = Buffer.concat(chunks || []);
-      // log small preview plus full hex for debugging (remove after fix)
-      console.log('RAW-BODY-HEX-LEN', buf.length, 'HEX:', buf.toString('hex').slice(0,400));
-      // attach for other handlers if needed
-      req.rawBodyHex = buf.toString('hex');
-    } catch (e) {
-      console.error('RAW-BODY-LOG-ERR', e);
+      // strip UTF-8 BOM if present
+      let start = 0;
+      if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) start = 3;
+      // if request accidentally contains garbage before JSON, find first { or [
+      const firstBrace = buf.slice(start).indexOf(0x7b); // '{'
+      const firstBracket = buf.slice(start).indexOf(0x5b); // '['
+      let firstJson = -1;
+      if (firstBrace >= 0 && firstBracket >= 0) firstJson = Math.min(firstBrace, firstBracket);
+      else firstJson = Math.max(firstBrace, firstBracket);
+      if (firstJson >= 0) start = start + firstJson;
+      const cleanBuf = buf.slice(start);
+      // optional debug (short preview) - remove after fix
+      console.log('BODY-SANITIZER: len', buf.length, 'cleanLen', cleanBuf.length, 'preview', cleanBuf.slice(0,120).toString());
+      // create a new readable stream for downstream parsers
+      const { Readable } = require('stream');
+      const s = new Readable();
+      s.push(cleanBuf);
+      s.push(null);
+      // copy minimal properties expected by body-parser
+      s.headers = req.headers;
+      s.method = req.method;
+      s.url = req.url;
+      // replace req's internal stream methods so express body-parser can read from it
+      req.socket = req.socket || s;
+      req._read = s._read?.bind(s);
+      req.read = s.read?.bind(s);
+      req.on = s.on?.bind(s);
+      req.pipe = s.pipe?.bind(s);
+      // attach the cleaned raw string for diagnostic access if needed
+      req._rawSanitized = cleanBuf.toString('utf8');
+      next();
+    } catch (err) {
+      console.error('BODY-SANITIZER-ERROR', err);
+      // allow upstream to handle parse error normally
+      next();
     }
-    // rewind the request so downstream body-parsers still work
-    // create a new Readable stream from the buffer and replace req
-    const { Readable } = require('stream');
-    const newStream = new Readable();
-    newStream.push(Buffer.concat(chunks || []));
-    newStream.push(null);
-    // copy relevant properties
-    newStream.headers = req.headers;
-    newStream.method = req.method;
-    newStream.url = req.url;
-    // replace req with the new stream for downstream parsers
-    Object.setPrototypeOf(newStream, Object.getPrototypeOf(req));
-    for (const k in req) if (!(k in newStream)) newStream[k] = req[k];
-    req = newStream;
-    next();
   });
-  req.on('error', (e) => { console.error('RAW-BODY-STREAM-ERR', e); next(); });
+
+  req.on('error', (e) => { console.error('BODY-SANITIZER-STREAM-ERR', e); next(); });
 });
 const PORT = process.env.PORT || 3000;
 
