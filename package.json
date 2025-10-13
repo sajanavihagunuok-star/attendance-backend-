@@ -9,6 +9,7 @@
         "test:integration": "cross-env NODE_ENV=test jest --runInBand"
     },
     "dependencies": {
+        "@supabase/supabase-js": "^2.75.0",
         "bcrypt": "^6.0.0",
         "cors": "^2.8.5",
         "dotenv": "^16.6.1",
