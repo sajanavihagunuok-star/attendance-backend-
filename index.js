@@ -1,4 +1,4 @@
-require('dotenv').config();
+﻿require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
@@ -473,6 +473,9 @@ app.get('/_debug/counters', asyncHandler(async (req, res) => {
   res.json(rows[0]);
 }));
 
+const sessionsRouter = require('./routes/sessions');
+app.use('/sessions', sessionsRouter);
+
 // ---------- HEALTH + ERROR + 404 ----------
 app.get('/ping', (req, res) => res.send('pong'));
 
@@ -507,3 +510,4 @@ function listRoutes(){
   }catch(e){ console.log('Route listing failed', e); }
 }
 setTimeout(listRoutes, 500);
+
