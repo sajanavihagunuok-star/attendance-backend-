@@ -1,5 +1,5 @@
 ﻿// index.js — complete server file (copy-paste ready)
-// IPv4-first by default; switchable via NODE_OPTIONS in environment
+// Forces IPv4 A record for DB connections; remove /_internal/db-check and DEBUG_TLS after debugging
 require('dns').setDefaultResultOrder('ipv4first');
 
 if (process.env.DEBUG_TLS === '1') {
@@ -19,7 +19,6 @@ const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const asyncHandler = require('express-async-handler');
 
-// Import your auth middleware (must exist)
 let verifyToken = (req, res, next) => next();
 let requireAuth = (req, res, next) => next();
 let requireRole = (role) => (req, res, next) => next();
@@ -111,38 +110,34 @@ if (!process.env.DATABASE_URL) {
   process.exit(1);
 }
 
-// ---------------- create pool with IPv4 resolution ----------------
-async function createPoolFromEnv() {
+// ---------------- create pool forcing IPv4 A record ----------------
+async function createPoolFromEnvForceIPv4() {
   const raw = process.env.DATABASE_URL;
   if (!raw) throw new Error('Missing DATABASE_URL in environment');
+  const parsed = new URL(raw.startsWith('postgres') ? raw : 'postgresql:' + raw);
+  // resolve A records only
+  let addrs;
   try {
-    const parsed = new URL(raw.startsWith('postgres') ? raw : 'postgresql:' + raw); // tolerate different prefixes
-    let host = parsed.hostname;
-    try {
-      const addrs = await dns.lookup(parsed.hostname, { family: 4, all: true });
-      if (addrs && addrs.length) host = addrs[0].address;
-    } catch (dnsErr) {
-      console.warn('IPv4 lookup failed, falling back to original host', dnsErr && dnsErr.message);
-    }
-    const userInfo = parsed.username ? parsed.username : '';
-    const pass = parsed.password ? ':' + parsed.password : '';
-    const auth = userInfo ? userInfo + pass + '@' : '';
-    const rebuilt = `${parsed.protocol}//${auth}${host}${parsed.port ? ':' + parsed.port : ''}${parsed.pathname}${parsed.search || ''}`;
-    return new Pool({
-      connectionString: rebuilt,
-      connectionTimeoutMillis: 10000,
-      idleTimeoutMillis: 10000,
-      ssl: (process.env.DEBUG_TLS === '1') ? { rejectUnauthorized: false } : { rejectUnauthorized: true }
-    });
+    addrs = await dns.resolve4(parsed.hostname);
   } catch (e) {
-    console.error('CREATE-POOL-ERR', e && e.stack || e);
-    throw e;
+    console.error('IPv4 resolve failed for host', parsed.hostname, e && e.message);
+    throw new Error('No IPv4 address found for DB host: ' + parsed.hostname);
   }
+  if (!addrs || !addrs.length) throw new Error('No IPv4 address found for DB host: ' + parsed.hostname);
+  const ipv4 = addrs[0];
+  const auth = parsed.username ? (parsed.username + (parsed.password ? ':' + parsed.password : '') + '@') : '';
+  const rebuilt = `${parsed.protocol}//${auth}${ipv4}${parsed.port ? ':' + parsed.port : ''}${parsed.pathname}${parsed.search || ''}`;
+  return new Pool({
+    connectionString: rebuilt,
+    connectionTimeoutMillis: 10000,
+    idleTimeoutMillis: 10000,
+    ssl: (process.env.DEBUG_TLS === '1') ? { rejectUnauthorized: false } : { rejectUnauthorized: true }
+  });
 }
 
 let pool;
-createPoolFromEnv().then(p => { pool = p; }).catch(err => {
-  console.error('FATAL: cannot create DB pool', err && err.stack || err);
+createPoolFromEnvForceIPv4().then(p => { pool = p; console.log('DB pool created using IPv4'); }).catch(err => {
+  console.error('FATAL: cannot create DB pool (no IPv4)', err && err.stack || err);
   process.exit(1);
 });
 
