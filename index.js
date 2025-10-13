@@ -19,6 +19,38 @@ const asyncHandler = require('express-async-handler');
 const { verifyToken, requireAuth, requireRole } = require('./middleware/auth');
 
 const app = express();
+// Raw-body logger (temporary)
+app.use((req, res, next) => {
+  const chunks = [];
+  req.on('data', (c) => chunks.push(Buffer.from(c)));
+  req.on('end', () => {
+    try {
+      const buf = Buffer.concat(chunks || []);
+      // log small preview plus full hex for debugging (remove after fix)
+      console.log('RAW-BODY-HEX-LEN', buf.length, 'HEX:', buf.toString('hex').slice(0,400));
+      // attach for other handlers if needed
+      req.rawBodyHex = buf.toString('hex');
+    } catch (e) {
+      console.error('RAW-BODY-LOG-ERR', e);
+    }
+    // rewind the request so downstream body-parsers still work
+    // create a new Readable stream from the buffer and replace req
+    const { Readable } = require('stream');
+    const newStream = new Readable();
+    newStream.push(Buffer.concat(chunks || []));
+    newStream.push(null);
+    // copy relevant properties
+    newStream.headers = req.headers;
+    newStream.method = req.method;
+    newStream.url = req.url;
+    // replace req with the new stream for downstream parsers
+    Object.setPrototypeOf(newStream, Object.getPrototypeOf(req));
+    for (const k in req) if (!(k in newStream)) newStream[k] = req[k];
+    req = newStream;
+    next();
+  });
+  req.on('error', (e) => { console.error('RAW-BODY-STREAM-ERR', e); next(); });
+});
 const PORT = process.env.PORT || 3000;
 
 if (!process.env.DATABASE_URL) {
@@ -27,7 +59,21 @@ if (!process.env.DATABASE_URL) {
 }
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-
+// DEBUG: dump raw request body as hex for troubleshooting malformed JSON
+const http = require('http');
+if (!global.__RAW_BODY_LOGGER_ADDED) {
+  global.__RAW_BODY_LOGGER_ADDED = true;
+  const express = require('express');
+  const original = express.request;
+  // attach rawBody logger middleware insertion helper for earliest position
+  // the code below registers a middleware that buffers raw bytes then sets req.rawBodyHex
+  module.exports = (function() {
+    try {
+      const appRef = require('./index'); // safe no-op when index requires itself; ignore errors
+    } catch(e) { /* ignore */ }
+  })();
+}
+process.on('uncaughtException', (err) => { console.error('UNCAUGHT', err && err.stack || err); });
 app.use(cors());
 app.use(express.json());
 app.use(verifyToken);
