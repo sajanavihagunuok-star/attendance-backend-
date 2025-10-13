@@ -1,0 +1,79 @@
+// src/utils/lecturerSessions.js
+// Session store, attendance persistence, auto-expire + recent archive
+
+const SESSIONS_KEY = 'lecturer_sessions_v1'      // active sessions array
+const ATT_PREFIX = 'attendance_'                 // per-session attendance array key
+const RECENT_KEY = 'lecturer_recent_sessions_v1' // archived sessions (24h)
+
+function now() { return Date.now() }
+
+export function readSessions() {
+  try { return JSON.parse(localStorage.getItem(SESSIONS_KEY) || '[]') } catch { return [] }
+}
+export function writeSessions(list) {
+  localStorage.setItem(SESSIONS_KEY, JSON.stringify(list || []))
+}
+
+export function createSession({ courseName, courseCode, startTs, durationMinutes }) {
+  const id = 's_' + Date.now()
+  const pin = String(Math.floor(10000 + Math.random() * 90000))
+  const start = Number.isFinite(startTs) ? startTs : now()
+  const end = start + Math.max(1, parseInt(durationMinutes || 5, 10)) * 60000
+  const session = { id, courseName: (courseName||'').trim(), courseCode: (courseCode||'').trim(), pin, start, end, durationMinutes: parseInt(durationMinutes||5,10) }
+  const list = readSessions()
+  list.unshift(session)
+  writeSessions(list)
+  localStorage.setItem(ATT_PREFIX + id, JSON.stringify([]))
+  return session
+}
+
+export function removeSession(sessionId) {
+  const sessions = readSessions().filter(s => s.id !== sessionId)
+  writeSessions(sessions)
+  const att = readAttendance(sessionId)
+  const finished = { id: sessionId, courseName: '', courseCode: '', endedAt: Date.now(), attendanceCount: (att||[]).length }
+  const recent = readRecent()
+  recent.unshift(finished)
+  localStorage.setItem(RECENT_KEY, JSON.stringify(recent.slice(0, 200)))
+  localStorage.removeItem(ATT_PREFIX + sessionId)
+}
+
+export function readAttendance(sessionId) {
+  try { return JSON.parse(localStorage.getItem(ATT_PREFIX + sessionId) || '[]') } catch { return [] }
+}
+export function addAttendance(sessionId, record) {
+  const list = readAttendance(sessionId)
+  list.push(record)
+  localStorage.setItem(ATT_PREFIX + sessionId, JSON.stringify(list))
+}
+export function clearAttendance(sessionId) {
+  localStorage.removeItem(ATT_PREFIX + sessionId)
+}
+
+export function readRecent() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]') || []
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000
+    const filtered = raw.filter(r => (r.endedAt || 0) >= cutoff)
+    localStorage.setItem(RECENT_KEY, JSON.stringify(filtered))
+    return filtered
+  } catch { return [] }
+}
+
+// Remove expired active sessions and archive them (call periodically)
+export function pruneExpiredSessions() {
+  const nowTs = Date.now()
+  const sessions = readSessions()
+  const active = sessions.filter(s => s.end > nowTs)
+  const expired = sessions.filter(s => s.end <= nowTs)
+  if (expired.length) {
+    const recent = readRecent()
+    expired.forEach(s => {
+      const att = readAttendance(s.id)
+      recent.unshift({ id: s.id, courseName: s.courseName, courseCode: s.courseCode, endedAt: nowTs, attendanceCount: (att||[]).length })
+      localStorage.removeItem(ATT_PREFIX + s.id)
+    })
+    localStorage.setItem(RECENT_KEY, JSON.stringify(recent.slice(0, 200)))
+    writeSessions(active)
+  }
+}
