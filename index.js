@@ -11,6 +11,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
+const { URL } = require('url');
+const dns = require('dns').promises;
 const { randomUUID } = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
@@ -102,18 +104,46 @@ app.use((req, res, next) => {
   }
 });
 
-// ---------------- config and pool ----------------
+// ---------------- config ----------------
 const PORT = process.env.PORT || 3000;
 if (!process.env.DATABASE_URL) {
   console.error('Missing DATABASE_URL in environment');
   process.exit(1);
 }
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  connectionTimeoutMillis: 10000,
-  idleTimeoutMillis: 10000,
-  ssl: (process.env.DEBUG_TLS === '1') ? { rejectUnauthorized: false } : { rejectUnauthorized: true }
+// ---------------- create pool with IPv4 resolution ----------------
+async function createPoolFromEnv() {
+  const raw = process.env.DATABASE_URL;
+  if (!raw) throw new Error('Missing DATABASE_URL in environment');
+  try {
+    const parsed = new URL(raw.startsWith('postgres') ? raw : 'postgresql:' + raw); // tolerate different prefixes
+    let host = parsed.hostname;
+    try {
+      const addrs = await dns.lookup(parsed.hostname, { family: 4, all: true });
+      if (addrs && addrs.length) host = addrs[0].address;
+    } catch (dnsErr) {
+      console.warn('IPv4 lookup failed, falling back to original host', dnsErr && dnsErr.message);
+    }
+    const userInfo = parsed.username ? parsed.username : '';
+    const pass = parsed.password ? ':' + parsed.password : '';
+    const auth = userInfo ? userInfo + pass + '@' : '';
+    const rebuilt = `${parsed.protocol}//${auth}${host}${parsed.port ? ':' + parsed.port : ''}${parsed.pathname}${parsed.search || ''}`;
+    return new Pool({
+      connectionString: rebuilt,
+      connectionTimeoutMillis: 10000,
+      idleTimeoutMillis: 10000,
+      ssl: (process.env.DEBUG_TLS === '1') ? { rejectUnauthorized: false } : { rejectUnauthorized: true }
+    });
+  } catch (e) {
+    console.error('CREATE-POOL-ERR', e && e.stack || e);
+    throw e;
+  }
+}
+
+let pool;
+createPoolFromEnv().then(p => { pool = p; }).catch(err => {
+  console.error('FATAL: cannot create DB pool', err && err.stack || err);
+  process.exit(1);
 });
 
 // ---------------- rate limiters ----------------
@@ -146,7 +176,6 @@ async function audit(actorUserId, action, entityType, entityId, payload) {
       [actorUserId, action, entityType, entityId, payload || {}]
     );
   } catch (e) {
-    // Non-fatal audit errors
     console.error('AUDIT-ERR', e && e.stack || e);
   }
 }
