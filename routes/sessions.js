@@ -15,7 +15,7 @@ function isUuid(v) { return typeof v === 'string' && /^[0-9a-fA-F-]{36}$/.test(v
 router.get('/', async (req, res) => {
   try {
     const { course_id, lecturer_id, date_from, date_to } = req.query;
-    const q = `SELECT id, title, course_id, lecturer_id, start_time, end_time, capacity, created_at
+    let q = `SELECT id, title, course_id, lecturer_id, start_time, end_time, capacity, created_at
                FROM sessions WHERE true`;
     const params = [];
     let i = 1;
