@@ -1,0 +1,27 @@
+name: Smoke Test (production)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Run smoke test against production
+        env:
+          BASE_URL: https://attendance-backend-zbpx.onrender.com
+        run: node ./scripts/smoke-test.js
