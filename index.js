@@ -7,6 +7,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const asyncHandler = require('express-async-handler');
+const { verifyToken, requireAuth, requireRole } = require('./middleware/auth');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -20,6 +21,7 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 app.use(cors());
 app.use(express.json());
+app.use(verifyToken);
 app.use(express.urlencoded({ extended: true }));
 app.get('/ping', (req, res) => res.send('pong'));
 
