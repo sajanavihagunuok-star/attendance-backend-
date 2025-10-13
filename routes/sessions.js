@@ -1,34 +1,34 @@
 ﻿const express = require('express');
 const router = express.Router();
+const { createClient } = require('@supabase/supabase-js');
 
-// Try to get a pg Pool instance. Adjust the require path if your project exports the pool elsewhere.
-let pool;
-try {
-  pool = require('../db');
-  if (pool && pool.query && typeof pool.query !== 'function') pool = pool.pool || pool.default || pool;
-} catch (e) {
-  try { pool = global.pool; } catch (e2) { pool = null; }
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error('Supabase env vars missing: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
 }
 
-function isUuid(v) { return typeof v === 'string' && /^[0-9a-fA-F-]{36}$/.test(v); }
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: { headers: { 'x-from-server': 'true' } }
+});
 
 router.get('/', async (req, res) => {
   try {
-    const { course_id, lecturer_id, date_from, date_to } = req.query;
-    let q = `SELECT id, title, course_id, lecturer_id, start_time, end_time, capacity, created_at
-               FROM sessions WHERE true`;
-    const params = [];
-    let i = 1;
-    if (course_id) { q += ` AND course_id = $${i++}`; params.push(course_id); }
-    if (lecturer_id) { q += ` AND lecturer_id = $${i++}`; params.push(lecturer_id); }
-    if (date_from) { q += ` AND start_time >= $${i++}`; params.push(date_from); }
-    if (date_to) { q += ` AND end_time <= $${i++}`; params.push(date_to); }
-    q += ' ORDER BY start_time DESC LIMIT 500';
-    if (!pool || !pool.query) return res.status(500).json({ error: 'database pool not available' });
-    const { rows } = await pool.query(q, params);
-    res.json({ ok: true, sessions: rows });
+    const { data, error } = await supabase
+      .from('sessions')
+      .select('id,title,course_id,lecturer_id,start_time,end_time,capacity,created_at')
+      .order('start_time', { ascending: false })
+      .limit(500);
+
+    if (error) {
+      console.error('supabase sessions list error', error);
+      return res.status(500).json({ error: error.message || 'supabase error' });
+    }
+
+    res.json({ ok: true, sessions: data || [] });
   } catch (err) {
-    console.error('sessions GET error', err && err.stack ? err.stack : err);
+    console.error('sessions GET error', err);
     res.status(500).json({ error: err.message || 'internal error' });
   }
 });
@@ -36,14 +36,23 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const id = req.params.id;
-    if (!isUuid(id)) return res.status(400).json({ error: 'invalid id' });
-    if (!pool || !pool.query) return res.status(500).json({ error: 'database pool not available' });
-    const q = 'SELECT id, title, course_id, lecturer_id, start_time, end_time, capacity, created_at FROM sessions WHERE id = $1 LIMIT 1';
-    const { rows } = await pool.query(q, [id]);
-    if (!rows || rows.length === 0) return res.status(404).json({ error: 'not found' });
-    res.json({ ok: true, session: rows[0] });
+    const { data, error } = await supabase
+      .from('sessions')
+      .select('id,title,course_id,lecturer_id,start_time,end_time,capacity,created_at')
+      .eq('id', id)
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      console.error('supabase session by id error', error);
+      return res.status(500).json({ error: error.message || 'supabase error' });
+    }
+
+    if (!data) return res.status(404).json({ error: 'not found' });
+
+    res.json({ ok: true, session: data });
   } catch (err) {
-    console.error('sessions/:id error', err && err.stack ? err.stack : err);
+    console.error('sessions/:id error', err);
     res.status(500).json({ error: err.message || 'internal error' });
   }
 });
