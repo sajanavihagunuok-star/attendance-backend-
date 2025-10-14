@@ -31,7 +31,11 @@ jobs:
           git fetch --all --prune || true
           git branch -vv || true
           git status --porcelain=v1 || true
-`r`n  uses: actions/checkout@v4`r`n  with:`r`n    fetch-depth: 0`r`n    persist-credentials: true
+      - name: Checkout repository (debug-friendly)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Set up Node
         uses: actions/setup-node@v4
