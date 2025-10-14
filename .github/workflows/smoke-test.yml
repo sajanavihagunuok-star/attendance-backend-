@@ -35,6 +35,13 @@ jobs:
           git remote -v
           git fetch --all --prune || true
           git branch -vv || true
+          git rev-parse --abbrev-ref HEAD || true
+          git log -n 5 --oneline || true
+          git status --porcelain=v1 || true
+          git --version
+          git remote -v
+          git fetch --all --prune || true
+          git branch -vv || true
           git status --porcelain=v1 || true
           git remote -v
           git fetch --all --prune || true
