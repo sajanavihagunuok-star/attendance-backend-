@@ -1,2 +1,4 @@
 ﻿.env
 node_modules/
+deployed_index.js
+seed-db.js
