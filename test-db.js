@@ -1,17 +1,14 @@
 // test-db.js
+require('dotenv').config();
 const { Pool } = require('pg');
-const url = process.env.DATABASE_URL;
-if (!url) {
-  console.error('No DATABASE_URL in env'); process.exit(1);
-}
-const pool = new Pool({ connectionString: url });
 (async () => {
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
   try {
-    const r = await pool.query('SELECT 1 as ok');
-    console.log('DB OK', r.rows);
-    await pool.end();
+    const { rows } = await pool.query('SELECT NOW() as now');
+    console.log('DB OK', rows[0].now.toString());
   } catch (e) {
-    console.error('DB ERR', e.message);
-    process.exit(1);
+    console.error('DB ERR', e.message || e);
+  } finally {
+    await pool.end();
   }
 })();

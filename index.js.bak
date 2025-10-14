@@ -1,447 +1,500 @@
-// index.js
-// Minimal backend single-file replacement for your MVP.
-// - Demo auth (JWT), local JSON persistence (data.json)
-// - Routes: /auth/register, /auth/login, /sessions, /sessions/:id/attendance
-// - Designed for local development and demo only.
+﻿// Force IPv4-first DNS resolution immediately
+require('dns').setDefaultResultOrder('ipv4first');
+// allow self-signed/managed certs for TLS if your environment needs it (only while debugging)
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = process.env.NODE_TLS_REJECT_UNAUTHORIZED || '0';
 
-import express from "express";
-import fs from "fs";
-import path from "path";
-import { randomUUID } from "crypto";
-import jwt from "jsonwebtoken";
-import bodyParser from "body-parser";
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const { Pool } = require('pg');
+const { randomUUID } = require('crypto');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
+const asyncHandler = require('express-async-handler');
+const { verifyToken, requireAuth, requireRole } = require('./middleware/auth');
 
 const app = express();
-app.use(bodyParser.json());
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  next();
-});
-
 const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || "change_this_for_prod";
-const DATA_FILE = path.resolve("./data.json");
 
-// --- Load / save store
-let store = { users: [], sessions: [], attendance: [], exportedAt: Date.now() };
-
-function loadStore() {
-  try {
-    if (fs.existsSync(DATA_FILE)) {
-      const raw = fs.readFileSync(DATA_FILE, "utf8") || "{}";
-      const parsed = JSON.parse(raw);
-      store.users = Array.isArray(parsed.users) ? parsed.users : [];
-      store.sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
-      store.attendance = Array.isArray(parsed.attendance) ? parsed.attendance : [];
-      store.exportedAt = parsed.exportedAt || Date.now();
-    } else {
-      saveStore();
-    }
-  } catch (e) {
-    console.error("loadStore error", e);
-    store = { users: [], sessions: [], attendance: [], exportedAt: Date.now() };
-    saveStore();
-  }
+if (!process.env.DATABASE_URL) {
+  console.error('Missing DATABASE_URL in .env');
+  process.exit(1);
 }
 
-function saveStore() {
-  try {
-    store.exportedAt = Date.now();
-    fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2));
-  } catch (e) {
-    console.error("saveStore error", e);
-  }
-}
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-loadStore();
+app.use(cors());
+app.use(express.json());
+app.use(verifyToken);
+app.use(express.urlencoded({ extended: true }));
+app.get('/ping', (req, res) => res.send('pong'));
 
-// --- Helpers
+// ---------- RATE LIMITERS ----------
+const qrRateLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 6,
+  message: { error: 'Too many QR requests, try again later' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+const qrInvalidateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many invalidate requests, try again later' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+// ---------- HELPERS ----------
+const isUuid = s => typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+const hash = async (pw) => await bcrypt.hash(pw, 10);
+const verify = async (pw, h) => await bcrypt.compare(pw, h);
+
 function signToken(payload) {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: "30d" });
+  const secret = process.env.JWT_SECRET || 'dev-secret';
+  return jwt.sign(payload, secret, { expiresIn: '12h' });
 }
-
-function verifyToken(token) {
-  return jwt.verify(token, JWT_SECRET);
-}
-
-// --- DB helper functions using local store
-async function createUser({ email, password, displayName, role = "student" }) {
-  const existing = store.users.find((u) => u.email === email);
-  if (existing) return null;
-  const user = {
-    id: randomUUID(),
-    email,
-    password: password || null,
-    displayName: displayName || email,
-    role,
-    createdAt: new Date().toISOString(),
-  };
-  store.users.push(user);
-  saveStore();
-  return user;
-}
-
-async function findUserByEmail(email) {
-  return store.users.find((u) => u.email === email) || null;
-}
-
-async function createSessionDb({ subjectId, start, end, createdBy }) {
-  const s = {
-    id: randomUUID(),
-    subjectId,
-    start: start || null,
-    end: end || null,
-    createdBy: createdBy || null,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-  store.sessions.push(s);
-  saveStore();
-  return s;
-}
-
-async function listSessionsDb() {
-  return store.sessions.slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-}
-
-async function getAttendanceDb(sessionId) {
-  return (store.attendance || []).filter((r) => r.sessionId === sessionId).sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-}
-
-async function createAttendanceDb({ sessionId, userId, present = true }) {
-  const rec = {
-    id: randomUUID(),
-    sessionId,
-    userId,
-    present,
-    timestamp: new Date().toISOString(),
-  };
-  store.attendance = Array.isArray(store.attendance) ? store.attendance : [];
-  store.attendance.push(rec);
-  saveStore();
-  return rec;
-}
-
-// --- Auth endpoints
-app.post("/auth/register", async (req, res) => {
-  const { email, password, displayName, role } = req.body || {};
-  if (!email || !password) return res.status(400).json({ error: "Missing email or password" });
-  const user = await createUser({ email, password, displayName, role });
-  if (!user) return res.status(409).json({ error: "User already exists" });
-  const token = signToken({ id: user.id, email: user.email, role: user.role });
-  return res.json({ user: { id: user.id, email: user.email, displayName: user.displayName, role: user.role }, token });
-});
-
-app.post("/auth/login", async (req, res) => {
-  const { email, password } = req.body || {};
-  if (!email || !password) return res.status(400).json({ error: "Missing email or password" });
-  const user = await findUserByEmail(email);
-  if (!user || user.password !== password) return res.status(401).json({ error: "Invalid credentials" });
-  const token = signToken({ id: user.id, email: user.email, role: user.role });
-  return res.json({ user: { id: user.id, email: user.email, displayName: user.displayName, role: user.role }, token });
-});
-
-// --- Auth middleware
-function authMiddleware(req, res, next) {
-  const header = req.headers.authorization || "";
-  if (!header.startsWith("Bearer ")) return res.status(401).json({ error: "Missing authorization" });
-  const token = header.slice("Bearer ".length);
-  try {
-    const payload = verifyToken(token);
-    req.user = payload;
-    return next();
-  } catch (e) {
-    return res.status(401).json({ error: "Invalid token" });
+function requireInstitute(req, res, next) {
+  const iid = req.user && req.user.institute_id;
+  if (!iid && !req.body.institute_id && !req.query.institute_id) {
+    return res.status(403).json({ error: 'Institute scope required' });
   }
-}
-// --- Role management endpoints (Owner, Super Admin, Admin)
-
-// Helper: require role
-function requireRole(role) {
-  return (req, res, next) => {
-    if (!req.user || req.user.role !== role) return res.status(403).json({ error: "Forbidden" });
-    return next();
-  };
+  req.institute_id = req.user.institute_id || req.body.institute_id || req.query.institute_id;
+  next();
 }
 
-// Owner can create a Super Admin
-app.post("/auth/create-super-admin", authMiddleware, requireRole("owner"), async (req, res) => {
-  try {
-    const { email, password, displayName } = req.body || {};
-    if (!email || !password) return res.status(400).json({ error: "Missing fields" });
-    const user = await createUser({ email, password, displayName, role: "super_admin" });
-    if (!user) return res.status(409).json({ error: "User already exists" });
-    return res.json({ user: { id: user.id, email: user.email, role: user.role } });
-  } catch (e) {
-    console.error("create-super-admin error", e);
-    return res.status(500).json({ error: "Failed to create super admin" });
-  }
-});
+async function audit(actorUserId, action, entityType, entityId, payload) {
+  await pool.query(
+    'INSERT INTO audits(actor_user_id, action, entity_type, entity_id, payload) VALUES ($1,$2,$3,$4,$5)',
+    [actorUserId, action, entityType, entityId, payload || {}]
+  );
+}
 
-// Owner or Super Admin can create Admins
-app.post("/auth/create-admin", authMiddleware, async (req, res) => {
+// ---------- AUTH / USER / INSTITUTE ----------
+app.post('/institutes', asyncHandler(async (req, res) => {
+  const { name, domain } = req.body || {};
+  if (!name) return res.status(400).json({ error: 'name required' });
+  const { rows } = await pool.query(
+    'INSERT INTO institutes(id,name,domain,created_at) VALUES (gen_random_uuid(), $1, $2, now()) RETURNING *',
+    [name, domain || null]
+  );
+  res.json({ institute: rows[0] });
+}));
+
+app.post('/auth/register', asyncHandler(async (req, res) => {
+  const { email, password, institute_id, role, full_name } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'email and password required' });
+  const hashed = await hash(password);
+  const client = await pool.connect();
   try {
-    if (!req.user || (req.user.role !== "owner" && req.user.role !== "super_admin")) {
-      return res.status(403).json({ error: "Forbidden" });
+    await client.query('BEGIN');
+    const ures = await client.query(
+      'INSERT INTO users(id,institute_id,email,password_hash,role,created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, now()) RETURNING *',
+      [institute_id || null, email.toLowerCase(), hashed, role || 'student']
+    );
+    const user = ures.rows[0];
+    if (full_name) {
+      await client.query(
+        'INSERT INTO profiles(user_id,full_name,created_at) VALUES ($1,$2,now())',
+        [user.id, full_name]
+      );
     }
-    const { email, password, displayName } = req.body || {};
-    if (!email || !password) return res.status(400).json({ error: "Missing fields" });
-    const user = await createUser({ email, password, displayName, role: "admin" });
-    if (!user) return res.status(409).json({ error: "User already exists" });
-    return res.json({ user: { id: user.id, email: user.email, role: user.role } });
-  } catch (e) {
-    console.error("create-admin error", e);
-    return res.status(500).json({ error: "Failed to create admin" });
-  }
-});
-// --- Course canonicalization and session validation
-
-
-// Ensure data.json has courses array
-function ensureCourses() {
-  const p = './data.json';
-  const j = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8') || '{}') : {};
-  j.courses = Array.isArray(j.courses) ? j.courses : [];
-  fs.writeFileSync(p, JSON.stringify(j, null, 2));
-}
-ensureCourses();
-
-// Create course helper
-async function createCourse({ code, name, createdBy }) {
-  if (!code || !name) return null;
-  const p = './data.json';
-  const j = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8') || '{}') : {};
-  j.courses = Array.isArray(j.courses) ? j.courses : [];
-  if (j.courses.find(c => c.code === code)) return null;
-  const c = { id: crypto.randomUUID(), code, name, createdBy, createdAt: new Date().toISOString() };
-  j.courses.push(c);
-  fs.writeFileSync(p, JSON.stringify(j, null, 2));
-  return c;
-}
-
-// Find course by code or id
-function findCourseByCode(code) {
-  const p = './data.json';
-  if (!fs.existsSync(p)) return null;
-  const j = JSON.parse(fs.readFileSync(p, 'utf8') || '{}');
-  j.courses = Array.isArray(j.courses) ? j.courses : [];
-  return j.courses.find(c => c.code === code || c.id === code) || null;
-}
-
-// Middleware to validate session creation body (normalized)
-function validateSessionBody(req, res, next) {
-  const body = req.body || {};
-  // Require either courseCode or subjectId or subject_id
-  if (!body.courseCode && !body.subjectId && !body.subject_id) {
-    return res.status(400).json({ error: "Missing courseCode or subjectId" });
-  }
-  // If courseCode provided, resolve to course and attach both field variants
-  if (body.courseCode) {
-    const course = findCourseByCode(body.courseCode);
-    if (!course) return res.status(400).json({ error: "Unknown courseCode. Create course first." });
-    req.body.subjectId = course.id;
-    req.body.subject_id = course.id;
-    req.body.subjectName = course.name;
-  } else if (body.subjectId || body.subject_id) {
-    // Normalize incoming subject id to both variants
-    const id = body.subjectId || body.subject_id;
-    req.body.subjectId = id;
-    req.body.subject_id = id;
-    // Optionally attach subjectName if course exists
-    const course = findCourseByCode(id);
-    if (course) req.body.subjectName = course.name;
-  }
-  // Validate start presence and normalize name
-  if (!body.start && !body.startTime && !body.start_at) {
-    return res.status(400).json({ error: "Missing start date/time" });
-  }
-  req.body.start = body.start || body.startTime || body.start_at;
-  return next();
-}
-
-// Expose helpers for other routes if needed
-app.post('/courses', authMiddleware, (req, res) => {
-  try {
-    const user = req.user || {};
-    if (!user || (user.role !== 'owner' && user.role !== 'super_admin' && user.role !== 'admin')) {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-    const { code, name } = req.body || {};
-    if (!code || !name) return res.status(400).json({ error: 'Missing code or name' });
-    createCourse({ code: code.trim(), name: name.trim(), createdBy: user.id }).then(c => {
-      if (!c) return res.status(409).json({ error: 'Course code already exists' });
-      return res.json({ course: c });
-    }).catch(e => {
-      console.error('createCourse error', e);
-      return res.status(500).json({ error: 'Failed to create course' });
+    await audit(user.id, 'register', 'user', user.id, { email, institute_id, role });
+    await client.query('COMMIT');
+    const token = signToken({
+      sub: user.id,
+      role: user.role,
+      email: user.email,
+      institute_id: user.institute_id
     });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: 'Server error' });
+    res.json({ user, token });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err.code === '23505') return res.status(409).json({ error: 'user exists' });
+    throw err;
+  } finally {
+    client.release();
   }
-});
+}));
 
-app.get('/courses/:code', authMiddleware, (req, res) => {
-  const code = req.params.code;
-  const c = findCourseByCode(code);
-  if (!c) return res.status(404).json({ error: 'Not found' });
-  return res.json({ course: c });
-});
+app.post('/auth/login', asyncHandler(async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'email and password required' });
+  const { rows } = await pool.query('SELECT * FROM users WHERE email = $1 LIMIT 1', [email.toLowerCase()]);
+  if (!rows[0]) return res.status(401).json({ error: 'Invalid credentials' });
+  const user = rows[0];
+  if (!user.password_hash) return res.status(401).json({ error: 'Invalid credentials' });
+  const ok = await verify(password, user.password_hash);
+  if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+  const token = signToken({
+    sub: user.id,
+    role: user.role,
+    email: user.email,
+    institute_id: user.institute_id
+  });
+  await audit(user.id, 'login', 'user', user.id, {});
+  res.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      institute_id: user.institute_id
+    },
+    token
+  });
+}));
+// ---------- COURSES ----------
+app.post('/courses', requireAuth, asyncHandler(async (req, res) => {
+  const actor = req.auth;
+  const actorRow = (await pool.query('SELECT * FROM users WHERE id=$1 LIMIT 1', [actor.sub])).rows[0];
+  if (!(actorRow && ['owner','super_admin','admin'].includes(actorRow.role))) return res.status(403).json({ error: 'Admin required' });
 
-// Attach the session validation middleware to your existing sessions POST route.
-// Create session (normalized, uses validateSessionBody)
-// Replace the existing app.post("/sessions" handler with this normalized handler
-app.post("/sessions", authMiddleware, validateSessionBody, async (req, res) => {
+  const { code, name, description } = req.body || {};
+  if (!code || !name) return res.status(400).json({ error: 'code and name required' });
+
   try {
-    const fs = (await import('fs')).default;
-    const crypto = (await import('crypto')).default;
-    const p = './data.json';
-    const body = req.body || {};
-    const creator = req.user && req.user.id ? req.user.id : null;
-
-    // validateSessionBody will normalize courseCode -> subjectId and start
-    const subjectId = body.subjectId || body.subject_id;
-    const start = body.start;
-    const end = body.end || null;
-
-    if (!subjectId || !start) return res.status(400).json({ error: 'Missing subjectId or start' });
-
-    const data = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8') || '{}') : {};
-    data.sessions = Array.isArray(data.sessions) ? data.sessions : [];
-
-    const session = {
-      id: crypto.randomUUID(),
-      subject_id: subjectId,
-      subjectId: subjectId,
-      start,
-      end,
-      created_by: creator,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    };
-
-    data.sessions.push(session);
-    fs.writeFileSync(p, JSON.stringify(data, null, 2));
-    return res.json({ session });
-  } catch (e) {
-    console.error('create session error', e);
-    return res.status(500).json({ error: 'Failed to create session' });
+    const q = 'INSERT INTO courses(id,institute_id,code,name,description,created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, now()) RETURNING *';
+    const { rows } = await pool.query(q, [actorRow.institute_id, code, name, description || null]);
+    await audit(actor.sub, 'create_course', 'course', rows[0].id, { code, name });
+    res.json({ course: rows[0] });
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Course code exists' });
+    throw err;
   }
-});
+}));
 
-// --- Routes: attendance
-app.get("/sessions/:id/attendance", authMiddleware, async (req, res) => {
-  const sessionId = req.params.id;
-  try {
-    const rows = await getAttendanceDb(sessionId);
-    return res.json(rows);
-  } catch (e) {
-    console.error("get attendance error", e);
-    return res.status(500).json({ error: "Failed to get attendance" });
+app.get('/courses', requireAuth, asyncHandler(async (req, res) => {
+  const institute_id = req.user && req.user.institute_id;
+  const { rows } = await pool.query('SELECT * FROM courses WHERE institute_id = $1 ORDER BY created_at DESC', [institute_id]);
+  res.json({ courses: rows });
+}));
+
+app.get('/courses/lookup', asyncHandler(async (req, res) => {
+  const code = (req.query.code || '').trim();
+  const institute_id = req.query.institute_id || req.user && req.user.institute_id;
+  if (!code) return res.status(400).json({ error: 'code required' });
+  const { rows } = await pool.query('SELECT * FROM courses WHERE institute_id = $1 AND code = $2 LIMIT 1', [institute_id, code]);
+  if (!rows[0]) return res.status(404).json({ error: 'Not found' });
+  res.json({ course: rows[0] });
+}));
+
+app.get('/courses/:id', requireAuth, asyncHandler(async (req, res) => {
+  const id = req.params.id;
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid id' });
+  const { rows } = await pool.query('SELECT * FROM courses WHERE id = $1 LIMIT 1', [id]);
+  if (!rows[0]) return res.status(404).json({ error: 'not found' });
+  res.json({ course: rows[0] });
+}));
+
+app.put('/courses/:id', requireAuth, asyncHandler(async (req, res) => {
+  const actor = req.auth;
+  const actorRow = (await pool.query('SELECT * FROM users WHERE id=$1 LIMIT 1', [actor.sub])).rows[0];
+  if (!(actorRow && ['owner','super_admin','admin'].includes(actorRow.role))) return res.status(403).json({ error: 'Admin required' });
+
+  const id = req.params.id;
+  const { name, description, code } = req.body || {};
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid id' });
+
+  const { rows } = await pool.query(
+    'UPDATE courses SET name=$1, description=$2, code=$3, updated_at=now() WHERE id=$4 RETURNING *',
+    [name, description || null, code, id]
+  );
+  res.json({ course: rows[0] });
+}));
+
+app.delete('/courses/:id', requireAuth, asyncHandler(async (req, res) => {
+  const actor = req.auth;
+  const actorRow = (await pool.query('SELECT * FROM users WHERE id=$1 LIMIT 1', [actor.sub])).rows[0];
+  if (!(actorRow && ['owner','super_admin','admin'].includes(actorRow.role))) return res.status(403).json({ error: 'Admin required' });
+
+  const id = req.params.id;
+  if (!isUuid(id)) return res.status(400).json({ error: 'invalid id' });
+  await pool.query('DELETE FROM courses WHERE id=$1', [id]);
+  res.json({ deleted: id });
+}));
+
+// ---------- BATCHES ----------
+app.post('/batches', requireAuth, asyncHandler(async (req, res) => {
+  const actor = req.auth;
+  const actorRow = (await pool.query('SELECT * FROM users WHERE id=$1 LIMIT 1', [actor.sub])).rows[0];
+  if (!(actorRow && ['owner','super_admin','admin'].includes(actorRow.role))) return res.status(403).json({ error: 'Admin required' });
+
+  const { name } = req.body || {};
+  if (!name) return res.status(400).json({ error: 'name required' });
+
+  const { rows } = await pool.query(
+    'INSERT INTO batches(id,institute_id,name,created_at) VALUES (gen_random_uuid(), $1, $2, now()) RETURNING *',
+    [actorRow.institute_id, name]
+  );
+  await audit(actor.sub, 'create_batch', 'batch', rows[0].id, { name });
+  res.json({ batch: rows[0] });
+}));
+
+app.get('/batches', requireAuth, asyncHandler(async (req, res) => {
+  const inst = req.user && req.user.institute_id;
+  const { rows } = await pool.query('SELECT * FROM batches WHERE institute_id = $1 ORDER BY created_at DESC', [inst]);
+  res.json({ batches: rows });
+}));
+
+// ---------- ENROLLMENTS ----------
+app.post('/enrollments', requireAuth, asyncHandler(async (req, res) => {
+  const actor = req.auth;
+  const actorRow = (await pool.query('SELECT * FROM users WHERE id=$1 LIMIT 1', [actor.sub])).rows[0];
+  if (!(actorRow && ['owner','super_admin','admin'].includes(actorRow.role))) return res.status(403).json({ error: 'Admin required' });
+
+  const { student_id, course_id, batch_id } = req.body || {};
+  if (!student_id || !course_id) return res.status(400).json({ error: 'student_id and course_id required' });
+
+  const { rows } = await pool.query(
+    'INSERT INTO enrollments(id,student_id,course_id,batch_id,created_at) VALUES (gen_random_uuid(), $1, $2, $3, now()) RETURNING *',
+    [student_id, course_id, batch_id || null]
+  );
+  await audit(actor.sub, 'enroll', 'enrollment', rows[0].id, { student_id, course_id, batch_id });
+  res.json({ enrollment: rows[0] });
+}));
+
+app.get('/enrollments', requireAuth, asyncHandler(async (req, res) => {
+  const inst = req.user && req.user.institute_id;
+  const { rows } = await pool.query(`
+    SELECT e.*, p.full_name, c.code, c.name as course_name FROM enrollments e
+    LEFT JOIN profiles p ON p.id = e.student_id
+    LEFT JOIN courses c ON c.id = e.course_id
+    WHERE c.institute_id = $1 ORDER BY e.created_at DESC
+  `, [inst]);
+  res.json({ enrollments: rows });
+}));
+
+// ---------- PROFILES ----------
+app.get('/profiles', requireAuth, asyncHandler(async (req, res) => {
+  const inst = req.user && req.user.institute_id;
+  const { rows } = await pool.query(
+    'SELECT * FROM profiles WHERE (user_id IS NULL OR user_id IN (SELECT id FROM users WHERE institute_id = $1)) ORDER BY created_at DESC LIMIT 1000',
+    [inst]
+  );
+  res.json({ profiles: rows });
+}));
+
+app.post('/profiles', asyncHandler(async (req, res) => {
+  const { id, full_name, user_id, is_teacher, batch_id } = req.body || {};
+  const q = `INSERT INTO profiles(id, user_id, full_name, is_teacher, batch_id, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5, now(), now()) RETURNING *`;
+  const params = [id || randomUUID(), user_id || null, full_name || null, !!is_teacher, batch_id || null];
+  const { rows } = await pool.query(q, params);
+  res.json({ profile: rows[0] });
+}));
+// ---------- SESSIONS ----------
+app.post('/sessions', requireAuth, asyncHandler(async (req, res) => {
+  const isAdmin = req.user && ['admin','super_admin','owner'].includes(req.user.role);
+  const isLecturer = req.user && req.user.role === 'lecturer';
+  if (!isAdmin && !isLecturer) return res.status(403).json({ error: 'Admin or lecturer required' });
+
+  const incoming = req.body || {};
+  const { title, course_id, lecturer_id, start_time } = incoming;
+  const missing = [];
+  if (!title) missing.push('title');
+  if (!course_id) missing.push('course_id');
+  if (!start_time) missing.push('start_time');
+  if (!lecturer_id) missing.push('lecturer_id');
+  if (missing.length) return res.status(400).json({ error: 'Missing required fields', missing });
+
+  if (!isUuid(course_id)) return res.status(400).json({ error: 'invalid course_id' });
+  if (!isUuid(lecturer_id)) return res.status(400).json({ error: 'invalid lecturer_id' });
+
+  const q = `INSERT INTO sessions(id,title,course_id,start_time,end_time,lecturer_id,capacity,created_at)
+             VALUES (gen_random_uuid(), $1, $2, $3::timestamptz, $4::timestamptz, $5, $6, now()) RETURNING *`;
+  const params = [title, course_id, start_time, incoming.end_time || null, lecturer_id, incoming.capacity || null];
+  const { rows } = await pool.query(q, params);
+  res.json({ session: rows[0] });
+}));
+
+// ---------- QR / PIN ----------
+app.post('/qr', qrRateLimiter, asyncHandler(async (req, res) => {
+  const { session_id } = req.body || {};
+  if (!session_id) return res.status(400).json({ error: 'session_id required' });
+  if (!isUuid(session_id)) return res.status(400).json({ error: 'invalid session_id' });
+
+  const { rows: srows } = await pool.query(
+    'SELECT id, course_id, lecturer_id, start_time FROM sessions WHERE id = $1 LIMIT 1',
+    [session_id]
+  );
+  if (!srows[0]) return res.status(404).json({ error: 'Session not found' });
+  const sess = srows[0];
+  if (!sess.course_id || !sess.lecturer_id || !sess.start_time) {
+    return res.status(400).json({ error: 'Session missing required details. Fill course, lecturer and start_time before generating QR.' });
   }
-});
 
-app.post("/sessions/:id/attendance", authMiddleware, async (req, res) => {
-  const sessionId = req.params.id;
-  const { userId } = req.body || {};
-  try {
-    const callerId = req.user && req.user.id;
-    let targetUserId = callerId;
-    if (userId && req.user && req.user.role === "instructor") {
-      targetUserId = userId;
+  const existing = (await pool.query(
+    'SELECT * FROM session_qr WHERE session_id=$1 AND expires_at >= now() ORDER BY created_at DESC LIMIT 1',
+    [session_id]
+  )).rows[0];
+  if (existing) {
+    return res.json({ qr: existing, note: 'existing_active' });
+  }
+
+  const pin = Math.floor(100000 + Math.random() * 900000).toString();
+  const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+  const q = `INSERT INTO session_qr(session_id, pin, expires_at) VALUES ($1, $2, $3) RETURNING *`;
+  const { rows } = await pool.query(q, [session_id, pin, expiresAt]);
+  res.json({ qr: { session_id, pin: rows[0].pin, expires_at: rows[0].expires_at, created_at: rows[0].created_at } });
+}));
+
+app.get('/qr/:session_id', asyncHandler(async (req, res) => {
+  const session_id = req.params.session_id;
+  if (!isUuid(session_id)) return res.status(400).json({ error: 'invalid session_id' });
+  const { rows } = await pool.query(
+    'SELECT * FROM session_qr WHERE session_id = $1 AND expires_at >= now() ORDER BY created_at DESC LIMIT 1',
+    [session_id]
+  );
+  res.json({ qr: rows[0] || null });
+}));
+
+app.post('/qr/invalidate', qrInvalidateLimiter, requireAuth, asyncHandler(async (req, res) => {
+  const actor = req.auth;
+  const actorRow = (await pool.query('SELECT * FROM users WHERE id=$1 LIMIT 1', [actor.sub])).rows[0];
+  if (!(actorRow && ['owner','super_admin','admin','lecturer'].includes(actorRow.role))) return res.status(403).json({ error: 'Admin or lecturer required' });
+
+  const { session_id } = req.body || {};
+  if (!session_id) return res.status(400).json({ error: 'session_id required' });
+  if (!isUuid(session_id)) return res.status(400).json({ error: 'invalid session_id' });
+
+  const del = await pool.query('DELETE FROM session_qr WHERE session_id = $1 RETURNING *', [session_id]);
+  await audit(actor.sub, 'invalidate_qr', 'session_qr', session_id, { invalidated: del.rows.length });
+  res.json({ invalidated: del.rows.length, rows: del.rows });
+}));
+// ---------- ATTENDANCE ----------
+app.post('/attendance', asyncHandler(async (req, res) => {
+  const { session_id, student_id, attended, pin } = req.body || {};
+  if (!session_id || !student_id) return res.status(400).json({ error: 'Missing fields', missing: ['session_id','student_id'] });
+  if (!isUuid(session_id)) return res.status(400).json({ error: 'invalid session_id' });
+  if (!isUuid(student_id)) return res.status(400).json({ error: 'invalid student_id' });
+
+  const isAdminOrLecturer = req.user && ['admin','lecturer','super_admin','owner'].includes(req.user.role);
+  if (!isAdminOrLecturer) {
+    if (!pin) return res.status(403).json({ error: 'PIN required for marking attendance' });
+    const { rows: pinRows } = await pool.query(
+      'SELECT * FROM session_qr WHERE session_id = $1 AND pin = $2 ORDER BY created_at DESC LIMIT 1',
+      [session_id, String(pin)]
+    );
+    if (!pinRows[0]) return res.status(403).json({ error: 'Invalid PIN' });
+    if (new Date(pinRows[0].expires_at) < new Date()) return res.status(403).json({ error: 'PIN expired' });
+  }
+
+  const q = `INSERT INTO attendance(id, session_id, student_id, attended, marked_at)
+             VALUES (gen_random_uuid(), $1, $2, $3, now()) RETURNING *`;
+  const { rows } = await pool.query(q, [session_id, student_id, !!attended]);
+  res.json({ attendance: rows[0] });
+}));
+
+app.get('/attendance', asyncHandler(async (req, res) => {
+  const { student_id, batch_id, subject_id, date_from, date_to, session_id } = req.query;
+  let q = `SELECT a.*, s.course_id, p.batch_id FROM attendance a
+           LEFT JOIN sessions s ON s.id = a.session_id
+           LEFT JOIN profiles p ON p.id = a.student_id
+           WHERE true`;
+  const params = [];
+  let i = 1;
+
+  if (session_id) { if (!isUuid(session_id)) return res.status(400).json({ error: 'invalid session_id' }); q += ` AND a.session_id = $${i++}`; params.push(session_id); }
+  if (student_id) { q += ` AND a.student_id = $${i++}`; params.push(student_id); }
+  if (batch_id) { q += ` AND p.batch_id = $${i++}`; params.push(batch_id); }
+  if (subject_id) { q += ` AND s.course_id = $${i++}`; params.push(subject_id); }
+  if (date_from) { q += ` AND a.marked_at >= $${i++}`; params.push(date_from); }
+  if (date_to) { q += ` AND a.marked_at <= $${i++}`; params.push(date_to); }
+
+  q += ' ORDER BY a.marked_at DESC LIMIT 1000';
+  const { rows } = await pool.query(q, params);
+  res.json({ attendance: rows });
+}));
+
+app.get('/attendance/export', asyncHandler(async (req, res) => {
+  const { student_id, batch_id, subject_id, date_from, date_to, session_id } = req.query;
+  let q = `SELECT a.id as attendance_id, a.session_id, s.title as session_title, s.course_id, c.code as course_code, c.name as course_name,
+                  a.student_id, p.full_name as student_name, p.batch_id, a.attended, a.marked_at
+           FROM attendance a
+           LEFT JOIN sessions s ON s.id = a.session_id
+           LEFT JOIN courses c ON c.id = s.course_id
+           LEFT JOIN profiles p ON p.id = a.student_id
+           WHERE true`;
+  const params = [];
+  let i = 1;
+
+  if (session_id) { if (!isUuid(session_id)) return res.status(400).json({ error: 'invalid session_id' }); q += ` AND a.session_id = $${i++}`; params.push(session_id); }
+  if (student_id) { if (!isUuid(student_id)) return res.status(400).json({ error: 'invalid student_id' }); q += ` AND a.student_id = $${i++}`; params.push(student_id); }
+  if (batch_id) { q += ` AND p.batch_id = $${i++}`; params.push(batch_id); }
+  if (subject_id) { q += ` AND s.course_id = $${i++}`; params.push(subject_id); }
+  if (date_from) { q += ` AND a.marked_at >= $${i++}`; params.push(date_from); }
+  if (date_to) { q += ` AND a.marked_at <= $${i++}`; params.push(date_to); }
+
+  q += ' ORDER BY a.marked_at DESC LIMIT 5000';
+  const { rows } = await pool.query(q, params);
+
+  function escapeCsv(val) {
+    if (val === null || val === undefined) return '';
+    const s = String(val);
+    if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+      return `"${s.replace(/"/g, '""')}"`;
     }
-    const exists = store.sessions.find((s) => s.id === sessionId);
-    if (!exists) return res.status(404).json({ error: "Session not found" });
-
-    const rec = await createAttendanceDb({ sessionId, userId: targetUserId, present: true });
-    return res.json(rec);
-  } catch (e) {
-    console.error("create attendance error", e);
-    return res.status(500).json({ error: "Failed to mark attendance" });
+    return s;
   }
+
+  const header = ['attendance_id','session_id','session_title','course_id','course_code','course_name','student_id','student_name','batch_id','attended','marked_at'];
+  const csvLines = [header.join(',')];
+  for (const r of rows) {
+    const line = [
+      r.attendance_id,
+      r.session_id,
+      escapeCsv(r.session_title),
+      r.course_id,
+      escapeCsv(r.course_code),
+      escapeCsv(r.course_name),
+      r.student_id,
+      escapeCsv(r.student_name),
+      r.batch_id,
+      r.attended ? '1' : '0',
+      r.marked_at ? new Date(r.marked_at).toISOString() : ''
+    ].join(',');
+    csvLines.push(line);
+  }
+
+  const csv = csvLines.join('\n');
+  res.setHeader('Content-Disposition', 'attachment; filename=attendance_export.csv');
+  res.setHeader('Content-Type', 'text/csv');
+  res.send(csv);
+}));
+
+// ---------- DEBUG ----------
+app.get('/_debug/counters', asyncHandler(async (req, res) => {
+  const { rows } = await pool.query(`
+    SELECT
+      (SELECT count(*) FROM institutes) AS institutes,
+      (SELECT count(*) FROM users) AS users,
+      (SELECT count(*) FROM courses) AS courses,
+      (SELECT count(*) FROM sessions) AS sessions,
+      (SELECT count(*) FROM attendance) AS attendance,
+      (SELECT count(*) FROM profiles) AS profiles
+  `);
+  res.json(rows[0]);
+}));
+
+const sessionsRouter = require('./routes/sessions');
+app.use('/sessions', sessionsRouter);
+
+// ---------- HEALTH + ERROR + 404 ----------
+app.get('/ping', (req, res) => res.send('pong'));
+
+app.use((req, res) => {
+  res.status(404).json({ error: 'Route not found' });
 });
 
-// --- Health
-app.get("/health", (req, res) => res.json({ ok: true, env: { jwtSecret: !!process.env.JWT_SECRET } }));
-
-// GET single session by id (returns JSON session or 404)
-app.get('/sessions/:id', authMiddlewareOptional, async (req, res) => {
-  try {
-    const fs = (await import('fs')).default;
-    const p = './data.json';
-    const id = req.params.id;
-    const data = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8') || '{}') : {};
-    data.sessions = Array.isArray(data.sessions) ? data.sessions : [];
-    const session = data.sessions.find(s => s.id === id || s.sessionId === id);
-    if (!session) return res.status(404).json({ error: 'Not found' });
-    return res.json({ session });
-  } catch (e) {
-    console.error('get session error', e);
-    return res.status(500).json({ error: 'Failed to read session' });
-  }
+app.use((err, req, res, next) => {
+  console.error('ERROR', err && err.stack ? err.stack : err);
+  res.status(500).json({ error: err.message || 'internal error' });
 });
 
-
-// -// Attendance: accept sessionId or courseCode+start (canonicalize) and record attendance
-app.post('/attendance/mark', authMiddleware, async (req, res) => {
-  try {
-    const fs = (await import('fs')).default;
-    const crypto = (await import('crypto')).default;
-    const p = './data.json';
-    const body = req.body || {};
-
-    // Resolve sessionId from sessionId or courseCode+start
-    let sessionId = body.sessionId || body.session_id;
-    if (!sessionId && body.courseCode && body.start) {
-      const course = findCourseByCode(body.courseCode);
-      if (!course) return res.status(400).json({ error: 'Unknown courseCode' });
-      const data = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8') || '{}') : {};
-      data.sessions = Array.isArray(data.sessions) ? data.sessions : [];
-      const found = data.sessions.find(s => (s.subject_id === course.id || s.subjectId === course.id) && (s.start === body.start));
-      if (!found) return res.status(404).json({ error: 'Session not found for courseCode + start' });
-      sessionId = found.id || found.sessionId;
-    }
-    if (!sessionId) return res.status(400).json({ error: 'Missing sessionId or (courseCode and start)' });
-
-    const userId = body.userId || body.user_id || (req.user && req.user.id);
-    if (!userId) return res.status(400).json({ error: 'Missing userId' });
-
-    const present = typeof body.present === 'boolean' ? body.present : true;
-    const data = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8') || '{}') : {};
-    data.attendance = Array.isArray(data.attendance) ? data.attendance : [];
-
-    const attendance = {
-      id: crypto.randomUUID(),
-      sessionId,
-      userId,
-      present,
-      timestamp: new Date().toISOString()
-    };
-
-    data.attendance.push(attendance);
-    fs.writeFileSync(p, JSON.stringify(data, null, 2));
-    return res.json({ attendance });
-  } catch (e) {
-    console.error('mark attendance error', e);
-    return res.status(500).json({ error: 'Failed to mark attendance' });
-  }
-});
-
-function findCourseByCode(code) {
-  try {
-    const fs = require('fs');
-    const p = './data.json';
-    const data = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8') || '{}') : {};
-    data.courses = Array.isArray(data.courses) ? data.courses : [];
-    return data.courses.find(c => c.code === code || c.code?.toLowerCase() === code?.toLowerCase()) || null;
-  } catch (e) {
-    console.error('findCourseByCode error', e);
-    return null;
-  }
-}
-
--- Start server
+// ---------- START ----------
 app.listen(PORT, () => {
-  console.log(`Server listening at http://localhost:${PORT}`);
-  console.log(`API listening on port ${PORT}`);
+  console.log(`Server listening on ${PORT}`);
 });
+
