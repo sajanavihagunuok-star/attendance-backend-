@@ -22,8 +22,12 @@ jobs:
           --health-timeout 2s
           --health-retries 10
 
-    steps:
-      - name: Checkout repository (debug-friendly)
+    steps:      - name: Checkout repository (debug-friendly)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
       - name: Git debug info
         run: |
           git --version
@@ -31,11 +35,6 @@ jobs:
           git fetch --all --prune || true
           git branch -vv || true
           git status --porcelain=v1 || true
-      - name: Checkout repository (debug-friendly)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: true
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -91,6 +90,7 @@ jobs:
           curl -s -H "Authorization: Bearer $TOKEN" http://localhost:10000/courses | jq .
         env:
           JWT_SECRET: testsecret
+
 
 
 
