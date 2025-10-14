@@ -1,13 +1,11 @@
-﻿// index.js — final version
+// index.js � final version
 require('dns').setDefaultResultOrder('ipv4first');
 if (process.env.DEBUG_TLS === '1') {
-  console.warn('DEBUG_TLS=1 — certificate verification relaxed');
+  console.warn('DEBUG_TLS=1 � certificate verification relaxed');
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 }
 
 require('dotenv').config();
-// TEMP startup inspect — remove after debugging
-try { const raw = process.env.DATABASE_URL || '<MISSING>'; console.log('[STARTUP-DB-INSPECT] RAW_DATABASE_URL=', raw); console.log('[STARTUP-DB-INSPECT] HOST=', (()=>{const u=new URL(raw.startsWith('postgres')?raw:'postgresql:'+raw); return u.hostname;})()); } catch (e) { console.error('[STARTUP-DB-INSPECT] PARSE_ERR', e.message); }
 const express = require('express');
 const cors = require('cors');
 const { URL } = require('url');
