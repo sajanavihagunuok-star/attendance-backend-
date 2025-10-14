@@ -364,6 +364,6 @@ app.post('/qr/invalidate', qrInvalidateLimiter, requireAuth, asyncHandler(async 
   res.json({ invalidated: del.rows.length, rows: del.rows });
 }));
 
-// Attendance
-app.post('/attendance', asyncHandler(async (req, res) => {
-  const { session
+app.listen(PORT, () => {
+  console.log(`Server listening on ${PORT}`);
+});
