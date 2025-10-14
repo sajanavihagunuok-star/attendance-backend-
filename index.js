@@ -365,6 +365,10 @@ app.post('/qr/invalidate', qrInvalidateLimiter, requireAuth, asyncHandler(async 
   await audit(actor.sub, 'invalidate_qr', 'session_qr', session_id, { invalidated: del.rows.length });
   res.json({ invalidated: del.rows.length, rows: del.rows });
 }));
+app.get('/_internal/db-check', async (req, res) => {
+  const { rows } = await db.query('SELECT now() as now');
+  res.json({ ok: true, now: rows[0].now });
+});
 
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
