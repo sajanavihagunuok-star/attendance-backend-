@@ -545,7 +545,16 @@ app.use((err, req, res, next) => {
   console.error('ERROR', err && err.stack ? err.stack : err);
   res.status(500).json({ error: err.message || 'internal error' });
 });
+const db = require('./db'); // adjust path if needed
 
+app.get('/_internal/db-check', async (req, res) => {
+  try {
+    const result = await db.query('SELECT NOW() as now');
+    res.json({ ok: true, now: result.rows[0].now });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 // Start server
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
