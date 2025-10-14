@@ -67,7 +67,7 @@ jobs:
         run: echo "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/testdb" >> $GITHUB_ENV
 
       - name: Run migrations
-        run: node run-migrations.js
+        run: node migrate.js
         env:
           DATABASE_URL: ${{ env.DATABASE_URL }}
 
