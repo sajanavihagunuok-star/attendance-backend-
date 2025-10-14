@@ -22,7 +22,8 @@ jobs:
           --health-timeout 2s
           --health-retries 10
 
-    steps:      - name: Checkout repository (debug-friendly)
+    steps:
+      - name: Checkout repository (debug-friendly)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -31,6 +32,10 @@ jobs:
       - name: Git debug info
         run: |
           git --version
+          git remote -v
+          git fetch --all --prune || true
+          git branch -vv || true
+          git status --porcelain=v1 || true
           git remote -v
           git fetch --all --prune || true
           git branch -vv || true
