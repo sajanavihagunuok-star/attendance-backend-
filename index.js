@@ -136,7 +136,6 @@ async function createPoolFromEnvForceIPv4() {
   });
 }
 
-const db = require('./db'); // uses DATABASE_URL with SSL
 console.log('[db] pool initialized using DATABASE_URL');
 
 // ---------------- rate limiters ----------------
@@ -543,7 +542,6 @@ app.use((err, req, res, next) => {
   console.error('ERROR', err && err.stack ? err.stack : err);
   res.status(500).json({ error: err.message || 'internal error' });
 });
-const db = require('./db');
 
 app.get('/_internal/db-check', async (req, res) => {
   try {
