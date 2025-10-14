@@ -18,6 +18,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const asyncHandler = require('express-async-handler');
+const db = require('./db'); // adjust path if db.js is in a subfolder
 
 let verifyToken = (req, res, next) => next();
 let requireAuth = (req, res, next) => next();
@@ -135,11 +136,8 @@ async function createPoolFromEnvForceIPv4() {
   });
 }
 
-let pool;
-createPoolFromEnvForceIPv4().then(p => { pool = p; console.log('DB pool created using IPv4'); }).catch(err => {
-  console.error('FATAL: cannot create DB pool (no IPv4)', err && err.stack || err);
-  process.exit(1);
-});
+const db = require('./db'); // uses DATABASE_URL with SSL
+console.log('[db] pool initialized using DATABASE_URL');
 
 // ---------------- rate limiters ----------------
 const qrRateLimiter = rateLimit({
@@ -545,13 +543,14 @@ app.use((err, req, res, next) => {
   console.error('ERROR', err && err.stack ? err.stack : err);
   res.status(500).json({ error: err.message || 'internal error' });
 });
-const db = require('./db'); // adjust path if needed
+const db = require('./db');
 
 app.get('/_internal/db-check', async (req, res) => {
   try {
     const result = await db.query('SELECT NOW() as now');
     res.json({ ok: true, now: result.rows[0].now });
   } catch (err) {
+    console.error('REMOTE-DB-CHECK-ERR', err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
