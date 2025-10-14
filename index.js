@@ -18,7 +18,6 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const asyncHandler = require('express-async-handler');
-const db = require('./db'); // adjust path if db.js is in a subfolder
 
 let verifyToken = (req, res, next) => next();
 let requireAuth = (req, res, next) => next();
@@ -542,6 +541,8 @@ app.use((err, req, res, next) => {
   console.error('ERROR', err && err.stack ? err.stack : err);
   res.status(500).json({ error: err.message || 'internal error' });
 });
+
+const db = require('./db'); 
 
 app.get('/_internal/db-check', async (req, res) => {
   try {
