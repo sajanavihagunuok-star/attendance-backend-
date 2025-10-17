@@ -1,3 +1,19 @@
+// Defensive wrapper to ensure actor id is a string or null
+async function auditSafe(action, entity, actorId, payload) {
+  try {
+    // normalize actorId if an object with id or if non-string
+    let actor_user_id = null;
+    if (actorId) {
+      if (typeof actorId === 'string') actor_user_id = actorId;
+      else if (typeof actorId === 'object' && actorId.id) actor_user_id = actorId.id;
+    }
+    // call original auditSafe(assumes original function name is audit)
+    return await auditSafe(action, entity, actor_user_id, payload);
+  } catch (e) {
+    console.error('auditSafe error', e);
+    return null;
+  }
+}
 // index.js
 require('dns').setDefaultResultOrder('ipv4first');
 if (process.env.DEBUG_TLS === '1') {
@@ -56,7 +72,7 @@ function signToken(payload) {
   const secret = process.env.JWT_SECRET || 'dev-secret';
   return jwt.sign(payload, secret, { expiresIn: '12h' });
 }
-async function audit(actorUserId, action, entityType, entityId, payload) {
+async function auditSafe(actorUserId, action, entityType, entityId, payload) {
   try {
     await db.query(
       'INSERT INTO audits(actor_user_id, action, entity_type, entity_id, payload) VALUES ($1,$2,$3,$4,$5)',
@@ -167,7 +183,7 @@ app.post('/auth/register', asyncHandler(async (req, res) => {
     if (full_name) {
       await client.query('INSERT INTO profiles(user_id,full_name,created_at) VALUES ($1,$2,now())', [user.id, full_name]);
     }
-    await audit(user.id, 'register', 'user', user.id, { email, institute_id, role });
+    await auditSafe(user.id, 'register', 'user', user.id, { email, institute_id, role });
     await client.query('COMMIT');
     const token = signToken({ sub: user.id, role: user.role, email: user.email, institute_id: user.institute_id });
     res.json({ user, token });
@@ -191,7 +207,7 @@ app.post('/auth/login', asyncHandler(async (req, res) => {
   const ok = await compare(password, user.password_hash);
   if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
   const token = signToken({ sub: user.id, role: user.role, email: user.email, institute_id: user.institute_id });
-  await audit(user.id, 'login', 'user', user.id, {});
+  await auditSafe(user.id, 'login', 'user', user.id, {});
   res.json({ user: { id: user.id, email: user.email, role: user.role, institute_id: user.institute_id }, token });
 }));
 
@@ -205,7 +221,7 @@ app.post('/courses', requireAuth, asyncHandler(async (req, res) => {
   try {
     const q = 'INSERT INTO courses(id,institute_id,code,name,description,created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, now()) RETURNING *';
     const { rows } = await db.query(q, [actorRow.institute_id, code, name, description || null]);
-    await audit(actor.sub, 'create_course', 'course', rows[0].id, { code, name });
+    await auditSafe(actor.sub, 'create_course', 'course', rows[0].id, { code, name });
     res.json({ course: rows[0] });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Course code exists' });
@@ -265,7 +281,7 @@ app.post('/batches', requireAuth, asyncHandler(async (req, res) => {
   const { name } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name required' });
   const { rows } = await db.query('INSERT INTO batches(id,institute_id,name,created_at) VALUES (gen_random_uuid(), $1, $2, now()) RETURNING *', [actorRow.institute_id, name]);
-  await audit(actor.sub, 'create_batch', 'batch', rows[0].id, { name });
+  await auditSafe(actor.sub, 'create_batch', 'batch', rows[0].id, { name });
   res.json({ batch: rows[0] });
 }));
 
@@ -283,7 +299,7 @@ app.post('/enrollments', requireAuth, asyncHandler(async (req, res) => {
   const { student_id, course_id, batch_id } = req.body || {};
   if (!student_id || !course_id) return res.status(400).json({ error: 'student_id and course_id required' });
   const { rows } = await db.query('INSERT INTO enrollments(id,student_id,course_id,batch_id,created_at) VALUES (gen_random_uuid(), $1, $2, $3, now()) RETURNING *', [student_id, course_id, batch_id || null]);
-  await audit(actor.sub, 'enroll', 'enrollment', rows[0].id, { student_id, course_id, batch_id });
+  await auditSafe(actor.sub, 'enroll', 'enrollment', rows[0].id, { student_id, course_id, batch_id });
   res.json({ enrollment: rows[0] });
 }));
 
@@ -369,7 +385,7 @@ app.post('/qr/invalidate', qrInvalidateLimiter, requireAuth, asyncHandler(async 
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
   if (!isUuid(session_id)) return res.status(400).json({ error: 'invalid session_id' });
   const del = await db.query('DELETE FROM session_qr WHERE session_id = $1 RETURNING *', [session_id]);
-  await audit(actor.sub, 'invalidate_qr', 'session_qr', session_id, { invalidated: del.rows.length });
+  await auditSafe(actor.sub, 'invalidate_qr', 'session_qr', session_id, { invalidated: del.rows.length });
   res.json({ invalidated: del.rows.length, rows: del.rows });
 }));
 
@@ -382,3 +398,4 @@ app.get('/_internal/db-check', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
 });
+
