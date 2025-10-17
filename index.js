@@ -1,7 +1,7 @@
-// index.js — final version
+// index.js
 require('dns').setDefaultResultOrder('ipv4first');
 if (process.env.DEBUG_TLS === '1') {
-  console.warn('DEBUG_TLS=1 — certificate verification relaxed');
+  console.warn('DEBUG_TLS=1   certificate verification relaxed');
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 }
 
@@ -132,6 +132,14 @@ const qrInvalidateLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false
 });
+
+// ---------------- health check ----------------
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+// ---------------- routes ----------------
+
 // Institutes
 app.post('/institutes', asyncHandler(async (req, res) => {
   const { name, domain } = req.body || {};
@@ -248,6 +256,7 @@ app.delete('/courses/:id', requireAuth, asyncHandler(async (req, res) => {
   await db.query('DELETE FROM courses WHERE id=$1', [id]);
   res.json({ deleted: id });
 }));
+
 // Batches
 app.post('/batches', requireAuth, asyncHandler(async (req, res) => {
   const actor = req.auth;
@@ -363,13 +372,13 @@ app.post('/qr/invalidate', qrInvalidateLimiter, requireAuth, asyncHandler(async 
   await audit(actor.sub, 'invalidate_qr', 'session_qr', session_id, { invalidated: del.rows.length });
   res.json({ invalidated: del.rows.length, rows: del.rows });
 }));
+
 app.get('/_internal/db-check', async (req, res) => {
   const { rows } = await db.query('SELECT now() as now');
   res.json({ ok: true, now: rows[0].now });
 });
 
+// ---------------- start server ----------------
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
 });
-
-
