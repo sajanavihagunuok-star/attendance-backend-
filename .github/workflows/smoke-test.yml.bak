@@ -1,0 +1,114 @@
+﻿name: Smoke test
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: testdb
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d testdb"
+          --health-interval 5s
+          --health-timeout 2s
+          --health-retries 10
+
+    steps:
+      - name: Checkout repository (debug-friendly)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Git debug info
+        run: |
+          git --version
+          git remote -v
+          git fetch --all --prune || true
+          git branch -vv || true
+          git rev-parse --abbrev-ref HEAD || true
+          git log -n 5 --oneline || true
+          git status --porcelain=v1 || true
+          git --version
+          git remote -v
+          git fetch --all --prune || true
+          git branch -vv || true
+          git status --porcelain=v1 || true
+          git remote -v
+          git fetch --all --prune || true
+          git branch -vv || true
+          git status --porcelain=v1 || true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Wait for Postgres
+        run: |
+          for i in {1..20}; do
+            pg_isready -h localhost -p 5432 -U postgres -d testdb && break
+            sleep 1
+          done
+
+      - name: Export test DATABASE_URL
+        run: echo "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/testdb" >> $GITHUB_ENV
+
+      - name: Run migrations
+        run: node run-migrations.js
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+
+      - name: Seed test admin
+        run: node seed-users-final.js
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+
+      - name: Start app
+        run: |
+          npm start &
+          sleep 3
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+          JWT_SECRET: testsecret
+
+      - name: Wait for health
+        run: |
+          for i in {1..20}; do
+            curl -sS http://localhost:10000/health && break
+            sleep 1
+          done
+
+      - name: Login and call protected endpoint
+        run: |
+          TOKEN=$(curl -s -X POST http://localhost:10000/auth/login -H "Content-Type: application/json" -d '{"email":"admin+test@example.com","password":"Pass1234!"}' | jq -r '.token')
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "LOGIN_FAILED"
+            exit 1
+          fi
+          echo "GOT_TOKEN"
+          curl -s -H "Authorization: Bearer $TOKEN" http://localhost:10000/courses | jq .
+        env:
+          JWT_SECRET: testsecret
+
+
+
+
+
+
+
+
+
+

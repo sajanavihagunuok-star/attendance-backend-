@@ -8,4 +8,4 @@ app.get('/ping', (req, res) => res.send('pong'));
 
 app.listen(PORT, () => {
   console.log(`Health check server running on ${PORT}`);
-});
+}); 

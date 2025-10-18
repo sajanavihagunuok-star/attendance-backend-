@@ -1,0 +1,18 @@
+﻿smoke	Git debug info	2025-10-14T12:55:40.2235743Z * main de08da0 [origin/main] CI: run migrate.js instead of missing run-migrations.js
+smoke	Git debug info	2025-10-14T12:55:40.2266679Z de08da0 CI: run migrate.js instead of missing run-migrations.js
+smoke	Git debug info	2025-10-14T12:55:40.6057924Z * main de08da0 [origin/main] CI: run migrate.js instead of missing run-migrations.js
+smoke	Git debug info	2025-10-14T12:55:40.8473792Z * main de08da0 [origin/main] CI: run migrate.js instead of missing run-migrations.js
+smoke	Run migrations	∩╗┐2025-10-14T12:55:51.0628746Z ##[group]Run node migrate.js
+smoke	Run migrations	2025-10-14T12:55:51.0629021Z [36;1mnode migrate.js[0m
+smoke	Run migrations	2025-10-14T12:55:51.0657870Z shell: /usr/bin/bash -e {0}
+smoke	Run migrations	2025-10-14T12:55:51.0658084Z env:
+smoke	Run migrations	2025-10-14T12:55:51.0658690Z   DATABASE_URL: ***localhost:5432/testdb
+smoke	Run migrations	2025-10-14T12:55:51.0658951Z ##[endgroup]
+smoke	Run migrations	2025-10-14T12:55:51.1055114Z (node:2650) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/attendance-backend-/attendance-backend-/migrate.js is not specified and it doesn't parse as CommonJS.
+smoke	Run migrations	2025-10-14T12:55:51.1057056Z Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+smoke	Run migrations	2025-10-14T12:55:51.1058828Z To eliminate this warning, add "type": "module" to /home/runner/work/attendance-backend-/attendance-backend-/package.json.
+smoke	Run migrations	2025-10-14T12:55:51.1060142Z (Use `node --trace-warnings ...` to show where the warning was created)
+smoke	Run migrations	2025-10-14T12:55:51.2242285Z Migration ran successfully
+smoke	Seed test admin	2025-10-14T12:55:51.2693165Z Error: Cannot find module '/home/runner/work/attendance-backend-/attendance-backend-/seed-users-final.js'
+smoke	Seed test admin	2025-10-14T12:55:51.2695746Z   code: 'MODULE_NOT_FOUND',
+smoke	Seed test admin	2025-10-14T12:55:51.2725290Z ##[error]Process completed with exit code 1.
