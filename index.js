@@ -45,8 +45,6 @@ try {
 }
 
 const app = express();
-const { requireAuth } = require('./src/middleware/auth');
-app.use(requireAuth);
 const PORT = process.env.PORT || 3000;
 if (!process.env.DATABASE_URL) {
   console.error('Missing DATABASE_URL in environment');
@@ -400,5 +398,7 @@ app.get('/_internal/db-check', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
 });
+
+
 
 
