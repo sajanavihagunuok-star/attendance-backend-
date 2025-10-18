@@ -8,7 +8,6 @@ function verifyToken(req, res, next) {
   try {
     const authHeader = req.headers.authorization || req.headers.Authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      log('verifyToken: no Authorization header');
       return next();
     }
     const token = authHeader.split(' ')[1];
@@ -77,3 +76,4 @@ function requireRole(role) {
 }
 
 module.exports = { verifyToken, requireAuth, requireRole };
+
