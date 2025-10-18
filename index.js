@@ -98,6 +98,15 @@ app.use(express.json({
 app.use(express.urlencoded({ extended: false }));
 app.use(verifyToken);
 
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'attendance-backend',
+    env: process.env.NODE_ENV || 'development',
+    version: process.env.npm_package_version || null
+  });
+});
+
 // ---------------- fallback JSON parser ----------------
 app.use((req, res, next) => {
   try {
@@ -398,6 +407,7 @@ app.get('/_internal/db-check', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
 });
+
 
 
 
