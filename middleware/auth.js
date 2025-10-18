@@ -1,62 +1,79 @@
-// backend/middleware/auth.js
-// Minimal authentication/authorization middleware for local development.
-// Keeps behavior safe for production only as a placeholder — replace with real JWT/session logic later.
+﻿const jwt = require('jsonwebtoken');
 
-const jwt = require('jsonwebtoken');
-
-function getTokenFromHeader(req) {
-  const auth = req.headers.authorization || '';
-  if (!auth.startsWith('Bearer ')) return null;
-  return auth.slice(7).trim();
+function log(...args) {
+  try { console.error.apply(console, args); } catch(e) {}
 }
 
 function verifyToken(req, res, next) {
-  const token = getTokenFromHeader(req);
-  if (!token) {
-    req.user = null;
-    return next();
-  }
-
-  const secret = process.env.JWT_SECRET || '';
-  if (!secret) {
-    // No secret configured: attach a basic test user for local/dev convenience
-    req.user = { id: 'test-user', role: 'admin', institute_id: 'test-institute' };
-    return next();
-  }
-
   try {
-    const payload = jwt.verify(token, secret);
-    req.user = payload;
+    const authHeader = req.headers.authorization || req.headers.Authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      log('verifyToken: no Authorization header');
+      return next();
+    }
+    const token = authHeader.split(' ')[1];
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'dev-secret');
+      req.auth = decoded;
+      req.user = req.user || {};
+      req.user.id = req.user.id || decoded.sub;
+      req.user.role = req.user.role || decoded.role || decoded.rol || null;
+      req.user.email = req.user.email || decoded.email || null;
+      log('verifyToken: token verified, sub=' + (decoded.sub || 'undefined'));
+    } catch (err) {
+      log('verifyToken: jwt.verify failed', err && err.message);
+    }
     return next();
   } catch (err) {
-    // Invalid token: treat as unauthenticated
-    req.user = null;
+    log('verifyToken error', err && err.stack || err);
     return next();
   }
 }
 
 function requireAuth(req, res, next) {
-  if (!req.user) return res.status(401).json({ error: 'Authentication required' });
-  return next();
-}
-
-function requireRole(roleOrRoles) {
-  return function (req, res, next) {
-    const user = req.user || {};
-    if (!user.role) return res.status(403).json({ error: 'Role required' });
-
-    if (Array.isArray(roleOrRoles)) {
-      if (!roleOrRoles.includes(user.role)) return res.status(403).json({ error: 'Insufficient role' });
-      return next();
+  try {
+    const authHeader = req.headers.authorization || req.headers.Authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Missing Authorization header' });
     }
 
-    if (user.role !== roleOrRoles) return res.status(403).json({ error: 'Insufficient role' });
+    const token = authHeader.split(' ')[1];
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET || 'dev-secret');
+    } catch (err) {
+      return res.status(401).json({ message: 'Invalid or expired token' });
+    }
+
+    if (!decoded || typeof decoded !== 'object' || !decoded.sub) {
+      return res.status(401).json({ message: 'Invalid token payload: missing sub' });
+    }
+
+    req.auth = decoded;
+    req.user = req.user || {};
+    req.user.id = req.user.id || decoded.sub;
+    req.user.role = req.user.role || decoded.role || decoded.rol || null;
+    req.user.email = req.user.email || decoded.email || null;
+
     return next();
+  } catch (err) {
+    console.error('requireAuth error:', err && err.stack || err);
+    return res.status(500).json({ message: 'Internal auth error' });
+  }
+}
+
+function requireRole(role) {
+  return (req, res, next) => {
+    try {
+      const roleVal = (req.auth && (req.auth.role || req.auth.rol)) || (req.user && req.user.role);
+      if (!roleVal) return res.status(403).json({ message: 'Missing role' });
+      if (Array.isArray(role) ? role.includes(roleVal) : roleVal === role) return next();
+      return res.status(403).json({ message: 'Insufficient role' });
+    } catch (err) {
+      console.error('requireRole error:', err && err.stack || err);
+      return res.status(500).json({ message: 'Internal auth error' });
+    }
   };
 }
 
-module.exports = {
-  verifyToken,
-  requireAuth,
-  requireRole
-};
+module.exports = { verifyToken, requireAuth, requireRole };
