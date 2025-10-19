@@ -4,6 +4,12 @@ require('dotenv').config();
 
 const app = express();
 
+// CORS middleware added by script
+require('./middleware/cors')(app);
+
+// Logging CORS debug middleware
+require('./middleware/log_and_headers')(app);
+
 const corsOptions = {
   origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : ['http://localhost:3000'],
   methods: ['GET','POST','PUT','DELETE','OPTIONS'],
@@ -23,3 +29,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server listening on ${PORT}`));
 
 module.exports = app;
+
+
